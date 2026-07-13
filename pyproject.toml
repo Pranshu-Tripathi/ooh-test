@@ -9,7 +9,9 @@ description = "Local-first repository understanding, testing, and judging loop."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+  "alembic>=1.17,<2.0",
   "fastapi>=0.116,<1.0",
+  "sqlalchemy>=2.0,<3.0",
   "uvicorn[standard]>=0.35,<1.0",
   "pydantic-settings>=2.10,<3.0",
   "psycopg[binary]>=3.2,<4.0",

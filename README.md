@@ -29,3 +29,13 @@ curl http://localhost:8080/readyz
 ```
 
 Phase 1 is being implemented in reviewable components. The current component only establishes the application scaffold and Compose runtime.
+
+## Migrations
+
+The Compose `migrate` service runs Alembic before the API and worker start:
+
+```bash
+docker compose run --rm migrate
+```
+
+The API and worker readiness checks require the database to be at the packaged Alembic head revision.
