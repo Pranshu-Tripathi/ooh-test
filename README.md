@@ -8,7 +8,7 @@ Phase 1 starts with a Docker Compose MVP:
 - background worker service
 - Postgres metadata store
 - one-shot migration service
-- durable local cache volume
+- durable repo-local cache directory
 - native host Ollama access through `host.docker.internal`
 
 ## Local Runtime
@@ -37,16 +37,26 @@ curl -X POST http://localhost:8080/repositories \
   -d '{"source_type":"local_path","source_uri":"/workspace"}'
 ```
 
+Register a public GitHub repository:
+
+```bash
+curl -X POST http://localhost:8080/repositories \
+  -H "content-type: application/json" \
+  -d '{"source_type":"github","source_uri":"https://github.com/owner/repo.git"}'
+```
+
 Repository registration stores metadata and enqueues an `ingest_repository` job. The worker
-expects `source_uri` to be the path visible inside the container. By default, Compose mounts the
-current project at `/workspace`; set `OOH_REPOSITORY_MOUNT=/host/path:/workspace:ro` in `.env`
-to inspect a different local repository.
+expects local `source_uri` values to be paths visible inside the container. By default, Compose
+mounts the current project at `/workspace`; set
+`OOH_REPOSITORY_MOUNT=/host/path:/workspace:ro` in `.env` to inspect a different local
+repository. GitHub repositories are cloned or fast-forwarded under `OOH_CACHE_ROOT`, which
+Compose mounts to `.ooh_cache/` in this project.
 
 The worker currently creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
 `docs/**`, and `adr/**`, and marks the repository indexed at the resolved commit SHA.
 
-Phase 1 is being implemented in reviewable components. The current component only establishes the application scaffold and Compose runtime.
+Phase 1 is being implemented in reviewable components.
 
 ## Migrations
 

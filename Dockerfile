@@ -9,6 +9,10 @@ COPY pyproject.toml README.md ./
 COPY alembic.ini ./
 COPY src ./src
 
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y git \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -e .
 

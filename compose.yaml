@@ -42,7 +42,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ooh_cache:/ooh_cache
+      - ./.ooh_cache:/ooh_cache
       - ${OOH_REPOSITORY_MOUNT:-.:/workspace:ro}
     depends_on:
       postgres:
@@ -68,7 +68,7 @@ services:
       OOH_TEST_GENERATOR_MODEL: ${OOH_TEST_GENERATOR_MODEL:-qwen3-coder:8b}
       OOH_ANSWER_JUDGE_MODEL: ${OOH_ANSWER_JUDGE_MODEL:-deepseek-r1:8b}
     volumes:
-      - ooh_cache:/ooh_cache
+      - ./.ooh_cache:/ooh_cache
       - ${OOH_REPOSITORY_MOUNT:-.:/workspace:ro}
     depends_on:
       postgres:
@@ -83,4 +83,3 @@ services:
 
 volumes:
   postgres_data:
-  ooh_cache:

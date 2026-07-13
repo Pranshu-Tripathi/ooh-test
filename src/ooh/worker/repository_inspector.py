@@ -84,6 +84,9 @@ class LocalRepositoryInspector:
             raise ValueError(f"unsupported repository source type: {repository.source_type.value}")
 
         repository_path = Path(repository.source_uri).expanduser().resolve()
+        return self.inspect_path(repository, repository_path)
+
+    def inspect_path(self, repository: RepositoryRead, repository_path: Path) -> LocalRepositorySnapshot:
         if not repository_path.exists():
             raise ValueError(f"repository path is not visible to worker: {repository_path}")
         if not repository_path.is_dir():

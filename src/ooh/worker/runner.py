@@ -2,9 +2,10 @@ import logging
 
 from ooh.config import get_settings
 from ooh.db import Database
-from ooh.db.models import JobRead, JobType
+from ooh.db.models import JobRead, JobStatus, JobType
 from ooh.db.repos import GuidanceSourceRepo, JobRepo, RepoSnapshotRepo, RepositoryRepo
 from ooh.worker.repository_inspector import LocalRepositoryInspector
+from ooh.worker.repository_source_resolver import RepositorySourceResolver
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ class JobRunner:
         self.repository_repo = RepositoryRepo(db)
         self.repo_snapshot_repo = RepoSnapshotRepo(db)
         self.guidance_source_repo = GuidanceSourceRepo(db)
+        self.repository_source_resolver = RepositorySourceResolver(cache_root=settings.cache_root)
         self.repository_inspector = LocalRepositoryInspector(cache_root=settings.cache_root)
 
     def process_once(self) -> bool:
@@ -33,7 +35,13 @@ class JobRunner:
             self.dispatch(job)
         except Exception as exc:
             logger.exception("job failed", extra={"job_id": str(job.id), "job_type": job.job_type.value})
-            self.job_repo.mark_failed(job.id, error_summary=str(exc))
+            failed_job = self.job_repo.mark_failed(job.id, error_summary=str(exc))
+            if (
+                failed_job.status == JobStatus.FAILED
+                and failed_job.job_type == JobType.INGEST_REPOSITORY
+                and failed_job.repository_id is not None
+            ):
+                self.repository_repo.mark_failed(failed_job.repository_id)
             return True
 
         self.job_repo.mark_succeeded(job.id)
@@ -56,7 +64,8 @@ class JobRunner:
         if repository is None:
             raise ValueError(f"repository not found: {job.repository_id}")
 
-        snapshot = self.repository_inspector.inspect(repository)
+        resolved_source = self.repository_source_resolver.resolve(repository)
+        snapshot = self.repository_inspector.inspect_path(repository, resolved_source.path)
         self.repo_snapshot_repo.create(
             repository_id=job.repository_id,
             commit_sha=snapshot.commit_sha,
