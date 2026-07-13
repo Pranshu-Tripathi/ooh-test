@@ -3,6 +3,7 @@ from ooh.db.repos.attention_profiles import (
     AttentionProfileRepo,
     AttentionProfileWithFocusAreas,
 )
+from ooh.db.repos.context_packs import ContextPackRepo, ContextPackSourceInput, ContextPackWithSources
 from ooh.db.repos.drift_events import DriftEventRepo
 from ooh.db.repos.guidance_sources import GuidanceSourceRepo
 from ooh.db.repos.jobs import JobRepo
@@ -13,6 +14,9 @@ __all__ = [
     "AttentionFocusAreaInput",
     "AttentionProfileRepo",
     "AttentionProfileWithFocusAreas",
+    "ContextPackRepo",
+    "ContextPackSourceInput",
+    "ContextPackWithSources",
     "DriftEventRepo",
     "GuidanceSourceRepo",
     "JobRepo",

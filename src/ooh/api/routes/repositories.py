@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, status
 from ooh.api.schemas.repositories import (
     AttentionProfileCreateRequest,
     AttentionProfileResponse,
+    ContextPackResponse,
     DriftEventResponse,
     JobResponse,
     RepositoryCreateRequest,
@@ -12,15 +13,30 @@ from ooh.api.schemas.repositories import (
     RepositoryResponse,
     infer_repository_name,
 )
+from ooh.config import get_settings
 from ooh.db import get_database
 from ooh.db.models import JobType
-from ooh.db.repos import AttentionFocusAreaInput, AttentionProfileRepo, DriftEventRepo, JobRepo, RepositoryRepo
+from ooh.db.repos import (
+    AttentionFocusAreaInput,
+    AttentionProfileRepo,
+    ContextPackRepo,
+    DriftEventRepo,
+    GuidanceSourceRepo,
+    JobRepo,
+    RepoSnapshotRepo,
+    RepositoryRepo,
+)
+from ooh.worker.context_pack_builder import ContextPackBuilder
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
 repository_repo = RepositoryRepo(get_database())
 attention_profile_repo = AttentionProfileRepo(get_database())
+context_pack_repo = ContextPackRepo(get_database())
+repo_snapshot_repo = RepoSnapshotRepo(get_database())
+guidance_source_repo = GuidanceSourceRepo(get_database())
 job_repo = JobRepo(get_database())
 drift_event_repo = DriftEventRepo(get_database())
+context_pack_builder = ContextPackBuilder(cache_root=get_settings().cache_root)
 
 
 @router.post("", response_model=RepositoryRegistrationResponse, status_code=status.HTTP_201_CREATED)
@@ -126,6 +142,53 @@ def activate_attention_profile(repository_id: UUID, profile_id: UUID) -> Attenti
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="attention profile not found")
     return AttentionProfileResponse.from_records(profile.profile, profile.focus_areas)
+
+
+@router.post("/{repository_id}/context-packs", response_model=list[ContextPackResponse])
+def build_context_packs(repository_id: UUID) -> list[ContextPackResponse]:
+    repository = repository_repo.get(repository_id)
+    if repository is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
+
+    snapshot = repo_snapshot_repo.latest_for_repository(repository_id)
+    if snapshot is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="repository has no snapshots")
+
+    active_profile = attention_profile_repo.get_active_for_repository(repository_id)
+    drift_event = drift_event_repo.latest_for_repository(repository_id)
+    guidance_sources = guidance_source_repo.list_enabled_for_repository(repository_id)
+    built_packs = context_pack_builder.build(
+        repository=repository,
+        snapshot=snapshot,
+        drift_event=drift_event,
+        guidance_sources=guidance_sources,
+        attention_profile=active_profile.profile if active_profile is not None else None,
+        attention_focus_areas=active_profile.focus_areas if active_profile is not None else [],
+    )
+
+    created_packs = [
+        context_pack_repo.create(
+            repository_id=repository_id,
+            snapshot_id=snapshot.id,
+            attention_profile_id=active_profile.profile.id if active_profile is not None else None,
+            pack_type=built_pack.pack_type,
+            artifact_uri=built_pack.artifact_uri,
+            content_hash=built_pack.content_hash,
+            sources=built_pack.sources,
+        )
+        for built_pack in built_packs
+    ]
+    return [ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in created_packs]
+
+
+@router.get("/{repository_id}/context-packs", response_model=list[ContextPackResponse])
+def list_context_packs(repository_id: UUID) -> list[ContextPackResponse]:
+    repository = repository_repo.get(repository_id)
+    if repository is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
+
+    context_packs = context_pack_repo.list_for_repository(repository_id)
+    return [ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in context_packs]
 
 
 @router.get("/{repository_id}/drift-events", response_model=list[DriftEventResponse])

@@ -57,3 +57,15 @@ class GuidanceSourceRepo:
             for source in refreshed:
                 session.refresh(source)
             return [GuidanceSourceRead.model_validate(source) for source in refreshed]
+
+    def list_enabled_for_repository(self, repository_id: UUID) -> list[GuidanceSourceRead]:
+        with self.db.session() as session:
+            sources = session.scalars(
+                select(GuidanceSource)
+                .where(
+                    GuidanceSource.repository_id == repository_id,
+                    GuidanceSource.enabled.is_(True),
+                )
+                .order_by(GuidanceSource.path)
+            ).all()
+            return [GuidanceSourceRead.model_validate(source) for source in sources]

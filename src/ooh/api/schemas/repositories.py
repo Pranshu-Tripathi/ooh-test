@@ -9,6 +9,10 @@ from pydantic import BaseModel, Field, field_validator
 from ooh.db.models import (
     AttentionFocusAreaRead,
     AttentionProfileRead,
+    ContextPackRead,
+    ContextPackSourceRead,
+    ContextPackSourceType,
+    ContextPackType,
     DriftEventRead,
     DriftSeverity,
     JobRead,
@@ -183,6 +187,57 @@ class AttentionProfileResponse(BaseModel):
             ],
             created_at=profile.created_at,
         )
+
+
+class ContextPackSourceResponse(BaseModel):
+    id: UUID
+    context_pack_id: UUID
+    source_type: ContextPackSourceType
+    source_uri: str
+    content_hash: str | None
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, source: ContextPackSourceRead) -> "ContextPackSourceResponse":
+        return cls(
+            id=source.id,
+            context_pack_id=source.context_pack_id,
+            source_type=source.source_type,
+            source_uri=source.source_uri,
+            content_hash=source.content_hash,
+            created_at=source.created_at,
+        )
+
+
+class ContextPackResponse(BaseModel):
+    id: UUID
+    repository_id: UUID
+    snapshot_id: UUID
+    attention_profile_id: UUID | None
+    pack_type: ContextPackType
+    artifact_uri: str
+    content_hash: str | None
+    sources: list[ContextPackSourceResponse]
+    created_at: datetime
+
+    @classmethod
+    def from_records(
+        cls,
+        context_pack: ContextPackRead,
+        sources: list[ContextPackSourceRead],
+    ) -> "ContextPackResponse":
+        return cls(
+            id=context_pack.id,
+            repository_id=context_pack.repository_id,
+            snapshot_id=context_pack.snapshot_id,
+            attention_profile_id=context_pack.attention_profile_id,
+            pack_type=context_pack.pack_type,
+            artifact_uri=context_pack.artifact_uri,
+            content_hash=context_pack.content_hash,
+            sources=[ContextPackSourceResponse.from_record(source) for source in sources],
+            created_at=context_pack.created_at,
+        )
+
 
 def infer_repository_name(source_uri: str) -> str:
     trimmed = source_uri.rstrip("/")

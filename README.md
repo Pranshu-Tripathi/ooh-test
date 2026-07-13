@@ -57,6 +57,18 @@ List drift events for a repository:
 curl http://localhost:8080/repositories/{repository_id}/drift-events
 ```
 
+Build deterministic context packs from the latest snapshot:
+
+```bash
+curl -X POST http://localhost:8080/repositories/{repository_id}/context-packs
+```
+
+List context packs:
+
+```bash
+curl http://localhost:8080/repositories/{repository_id}/context-packs
+```
+
 Create an active attention profile to weight drift by path:
 
 ```bash
@@ -82,6 +94,7 @@ The worker currently creates a deterministic metadata snapshot in `OOH_CACHE_ROO
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
 `docs/**`, and `adr/**`, records baseline and commit-to-commit drift events using the active
 attention profile if one exists, and marks the repository indexed at the resolved commit SHA.
+The API can then build deterministic context-pack artifacts for later test generation.
 
 Phase 1 is being implemented in reviewable components.
 

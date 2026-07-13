@@ -47,3 +47,15 @@ class DriftEventRepo:
                 .limit(limit)
             ).all()
             return [DriftEventRead.model_validate(drift_event) for drift_event in drift_events]
+
+    def latest_for_repository(self, repository_id: UUID) -> DriftEventRead | None:
+        with self.db.session() as session:
+            drift_event = session.scalar(
+                select(DriftEvent)
+                .where(DriftEvent.repository_id == repository_id)
+                .order_by(DriftEvent.created_at.desc())
+                .limit(1)
+            )
+            if drift_event is None:
+                return None
+            return DriftEventRead.model_validate(drift_event)
