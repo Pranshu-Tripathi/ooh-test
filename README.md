@@ -28,6 +28,16 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
+Register a local repository:
+
+```bash
+curl -X POST http://localhost:8080/repositories \
+  -H "content-type: application/json" \
+  -d '{"source_type":"local_path","source_uri":"/path/to/repo"}'
+```
+
+Repository registration stores metadata and enqueues an `ingest_repository` job. The worker will process that job in a later Phase 1 slice.
+
 Phase 1 is being implemented in reviewable components. The current component only establishes the application scaffold and Compose runtime.
 
 ## Migrations

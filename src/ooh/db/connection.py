@@ -11,6 +11,24 @@ from ooh.config import get_settings
 from ooh.db.alembic_config import build_alembic_config, sqlalchemy_database_url
 
 
+class Database:
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
+        self.session_factory = sessionmaker(bind=engine, expire_on_commit=False)
+
+    @contextmanager
+    def session(self) -> Iterator[Session]:
+        session = self.session_factory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+
 @lru_cache
 def get_engine() -> Engine:
     settings = get_settings()
@@ -18,21 +36,14 @@ def get_engine() -> Engine:
 
 
 @lru_cache
-def get_session_factory() -> sessionmaker[Session]:
-    return sessionmaker(bind=get_engine(), expire_on_commit=False)
+def get_database() -> Database:
+    return Database(get_engine())
 
 
 @contextmanager
 def get_session() -> Iterator[Session]:
-    session = get_session_factory()()
-    try:
+    with get_database().session() as session:
         yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 def check_database() -> None:

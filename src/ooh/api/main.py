@@ -5,6 +5,7 @@ from fastapi import FastAPI
 import uvicorn
 
 from ooh import __version__
+from ooh.api.routes.repositories import router as repositories_router
 from ooh.config import get_settings
 from ooh.db import check_database, check_schema_current
 from ooh.logging import configure_logging
@@ -20,6 +21,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Out Of Hands Test API", version=__version__, lifespan=lifespan)
+app.include_router(repositories_router)
 
 
 @app.get("/healthz")
