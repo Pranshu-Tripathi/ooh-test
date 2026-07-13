@@ -1,9 +1,18 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 
 from ooh.db.connection import Database
-from ooh.db.models import Job, JobRead, JobType, Repository, RepositoryRead, RepositorySourceType
+from ooh.db.models import (
+    Job,
+    JobRead,
+    JobType,
+    Repository,
+    RepositoryRead,
+    RepositorySourceType,
+    RepositoryStatus,
+)
 
 
 class RepositoryRepo:
@@ -79,3 +88,34 @@ class RepositoryRepo:
         with self.db.session() as session:
             repositories = session.scalars(select(Repository).order_by(Repository.created_at.desc())).all()
             return [RepositoryRead.model_validate(repository) for repository in repositories]
+
+    def mark_indexing(self, repository_id: UUID) -> RepositoryRead:
+        return self.update_status(repository_id, RepositoryStatus.INDEXING)
+
+    def mark_indexed(self, repository_id: UUID) -> RepositoryRead:
+        return self.update_status(repository_id, RepositoryStatus.INDEXED, last_indexed_at=datetime.now(UTC))
+
+    def mark_failed(self, repository_id: UUID) -> RepositoryRead:
+        return self.update_status(repository_id, RepositoryStatus.FAILED)
+
+    def update_status(
+        self,
+        repository_id: UUID,
+        status: RepositoryStatus,
+        *,
+        last_indexed_at: datetime | None = None,
+    ) -> RepositoryRead:
+        now = datetime.now(UTC)
+
+        with self.db.session() as session:
+            repository = session.get(Repository, repository_id)
+            if repository is None:
+                raise ValueError(f"repository not found: {repository_id}")
+
+            repository.status = status
+            repository.updated_at = now
+            if last_indexed_at is not None:
+                repository.last_indexed_at = last_indexed_at
+            session.flush()
+            session.refresh(repository)
+            return RepositoryRead.model_validate(repository)
