@@ -1,3 +1,4 @@
+import fnmatch
 import subprocess
 from dataclasses import dataclass
 from decimal import Decimal
@@ -48,8 +49,29 @@ class FileChange:
     old_path: str | None = None
 
 
+@dataclass(frozen=True)
+class AttentionFocusWeight:
+    name: str
+    weight: Decimal
+    path_globs: list[str]
+
+
+@dataclass(frozen=True)
+class AttentionProfileWeights:
+    name: str
+    default_weight: Decimal
+    focus_areas: list[AttentionFocusWeight]
+
+
 class GitDriftScorer:
-    def score(self, repository_path: Path, *, from_commit_sha: str | None, to_commit_sha: str) -> DriftSummary:
+    def score(
+        self,
+        repository_path: Path,
+        *,
+        from_commit_sha: str | None,
+        to_commit_sha: str,
+        attention_profile: AttentionProfileWeights | None = None,
+    ) -> DriftSummary:
         if from_commit_sha is None:
             return DriftSummary(
                 from_commit_sha=None,
@@ -65,6 +87,7 @@ class GitDriftScorer:
                     "renamed_file_count": 0,
                     "config_file_count": 0,
                     "changed_files": [],
+                    "attention_profile": self._attention_profile_breakdown(attention_profile),
                 },
                 should_record=True,
             )
@@ -85,13 +108,16 @@ class GitDriftScorer:
         deleted_count = sum(1 for change in changes if change.status.startswith("D"))
         renamed_count = sum(1 for change in changes if change.status.startswith("R"))
         config_changes = [change for change in changes if self._is_config_path(change.path)]
-
-        raw_score = (
-            Decimal(len(changes) * 2)
-            + Decimal(additions + deletions) / Decimal(25)
-            + Decimal(deleted_count * 5)
-            + Decimal(renamed_count * 3)
-            + Decimal(len(config_changes) * 10)
+        weighted_changes = [
+            (
+                change,
+                *self._change_attention(change, attention_profile),
+                self._base_change_score(change),
+            )
+            for change in changes
+        ]
+        raw_score = sum(
+            base_score * weight for _change, weight, _matched_focus_areas, base_score in weighted_changes
         )
         drift_score = raw_score.quantize(Decimal("0.01"))
 
@@ -108,6 +134,7 @@ class GitDriftScorer:
                 "deleted_file_count": deleted_count,
                 "renamed_file_count": renamed_count,
                 "config_file_count": len(config_changes),
+                "attention_profile": self._attention_profile_breakdown(attention_profile),
                 "changed_files": [
                     {
                         "path": change.path,
@@ -116,8 +143,11 @@ class GitDriftScorer:
                         "additions": change.additions,
                         "deletions": change.deletions,
                         "config": self._is_config_path(change.path),
+                        "attention_weight": str(weight),
+                        "matched_focus_areas": matched_focus_areas,
+                        "base_score": str(base_score.quantize(Decimal("0.01"))),
                     }
-                    for change in changes[:100]
+                    for change, weight, matched_focus_areas, base_score in weighted_changes[:100]
                 ],
                 "changed_files_truncated": len(changes) > 100,
             },
@@ -196,6 +226,63 @@ class GitDriftScorer:
         if parsed_path.name.lower() in CONFIG_FILE_NAMES:
             return True
         return any(part.lower() in CONFIG_PATH_PARTS for part in parsed_path.parts)
+
+    @classmethod
+    def _base_change_score(cls, change: FileChange) -> Decimal:
+        score = Decimal("2.0") + Decimal(change.additions + change.deletions) / Decimal(25)
+        if change.status.startswith("D"):
+            score += Decimal("5.0")
+        if change.status.startswith("R"):
+            score += Decimal("3.0")
+        if cls._is_config_path(change.path):
+            score += Decimal("10.0")
+        return score
+
+    @staticmethod
+    def _change_attention(
+        change: FileChange,
+        attention_profile: AttentionProfileWeights | None,
+    ) -> tuple[Decimal, list[str]]:
+        if attention_profile is None:
+            return Decimal("1.0"), []
+
+        candidate_paths = [change.path]
+        if change.old_path is not None:
+            candidate_paths.append(change.old_path)
+
+        matched_focus_areas = [
+            focus_area
+            for focus_area in attention_profile.focus_areas
+            if any(
+                fnmatch.fnmatchcase(path, path_glob)
+                for path in candidate_paths
+                for path_glob in focus_area.path_globs
+            )
+        ]
+        if not matched_focus_areas:
+            return attention_profile.default_weight, []
+
+        strongest_focus_area = max(matched_focus_areas, key=lambda focus_area: focus_area.weight)
+        return strongest_focus_area.weight, [focus_area.name for focus_area in matched_focus_areas]
+
+    @staticmethod
+    def _attention_profile_breakdown(
+        attention_profile: AttentionProfileWeights | None,
+    ) -> dict[str, Any] | None:
+        if attention_profile is None:
+            return None
+        return {
+            "name": attention_profile.name,
+            "default_weight": str(attention_profile.default_weight),
+            "focus_areas": [
+                {
+                    "name": focus_area.name,
+                    "weight": str(focus_area.weight),
+                    "path_globs": focus_area.path_globs,
+                }
+                for focus_area in attention_profile.focus_areas
+            ],
+        }
 
     @staticmethod
     def _parse_numstat_count(value: str) -> int:

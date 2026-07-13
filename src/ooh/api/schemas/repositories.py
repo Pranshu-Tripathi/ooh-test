@@ -7,6 +7,8 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 from ooh.db.models import (
+    AttentionFocusAreaRead,
+    AttentionProfileRead,
     DriftEventRead,
     DriftSeverity,
     JobRead,
@@ -110,6 +112,77 @@ class DriftEventResponse(BaseModel):
             created_at=drift_event.created_at,
         )
 
+
+class AttentionFocusAreaRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=1000)
+    weight: Decimal = Field(default=Decimal("1.0"), ge=Decimal("0"), le=Decimal("10"))
+    path_globs: list[str] = Field(min_length=1, max_length=50)
+
+    @field_validator("path_globs")
+    @classmethod
+    def path_globs_must_not_be_blank(cls, value: list[str]) -> list[str]:
+        stripped = [path_glob.strip() for path_glob in value if path_glob.strip()]
+        if not stripped:
+            raise ValueError("path_globs must include at least one non-blank glob")
+        return stripped
+
+
+class AttentionProfileCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    default_weight: Decimal = Field(default=Decimal("1.0"), ge=Decimal("0"), le=Decimal("10"))
+    active: bool = True
+    focus_areas: list[AttentionFocusAreaRequest] = Field(default_factory=list, max_length=50)
+
+
+class AttentionFocusAreaResponse(BaseModel):
+    id: UUID
+    attention_profile_id: UUID
+    name: str
+    description: str | None
+    weight: Decimal
+    path_globs: list[str]
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, focus_area: AttentionFocusAreaRead) -> "AttentionFocusAreaResponse":
+        return cls(
+            id=focus_area.id,
+            attention_profile_id=focus_area.attention_profile_id,
+            name=focus_area.name,
+            description=focus_area.description,
+            weight=focus_area.weight,
+            path_globs=focus_area.path_globs,
+            created_at=focus_area.created_at,
+        )
+
+
+class AttentionProfileResponse(BaseModel):
+    id: UUID
+    repository_id: UUID
+    name: str
+    default_weight: Decimal
+    active: bool
+    focus_areas: list[AttentionFocusAreaResponse]
+    created_at: datetime
+
+    @classmethod
+    def from_records(
+        cls,
+        profile: AttentionProfileRead,
+        focus_areas: list[AttentionFocusAreaRead],
+    ) -> "AttentionProfileResponse":
+        return cls(
+            id=profile.id,
+            repository_id=profile.repository_id,
+            name=profile.name,
+            default_weight=profile.default_weight,
+            active=profile.active,
+            focus_areas=[
+                AttentionFocusAreaResponse.from_record(focus_area) for focus_area in focus_areas
+            ],
+            created_at=profile.created_at,
+        )
 
 def infer_repository_name(source_uri: str) -> str:
     trimmed = source_uri.rstrip("/")

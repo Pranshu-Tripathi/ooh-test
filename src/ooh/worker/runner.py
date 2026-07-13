@@ -1,10 +1,19 @@
 import logging
+from uuid import UUID
 
 from ooh.config import get_settings
 from ooh.db import Database
 from ooh.db.models import JobRead, JobStatus, JobType
-from ooh.db.repos import DriftEventRepo, GuidanceSourceRepo, JobRepo, RepoSnapshotRepo, RepositoryRepo
-from ooh.worker.drift_scorer import GitDriftScorer
+from ooh.db.repos import (
+    AttentionProfileRepo,
+    AttentionProfileWithFocusAreas,
+    DriftEventRepo,
+    GuidanceSourceRepo,
+    JobRepo,
+    RepoSnapshotRepo,
+    RepositoryRepo,
+)
+from ooh.worker.drift_scorer import AttentionFocusWeight, AttentionProfileWeights, GitDriftScorer
 from ooh.worker.repository_inspector import LocalRepositoryInspector
 from ooh.worker.repository_source_resolver import RepositorySourceResolver
 
@@ -17,6 +26,7 @@ class JobRunner:
         self.worker_id = worker_id
         self.job_repo = JobRepo(db)
         self.repository_repo = RepositoryRepo(db)
+        self.attention_profile_repo = AttentionProfileRepo(db)
         self.repo_snapshot_repo = RepoSnapshotRepo(db)
         self.drift_event_repo = DriftEventRepo(db)
         self.guidance_source_repo = GuidanceSourceRepo(db)
@@ -78,6 +88,7 @@ class JobRunner:
             resolved_source.path,
             from_commit_sha=repository.last_processed_commit_sha,
             to_commit_sha=snapshot.commit_sha,
+            attention_profile=self._active_attention_profile_weights(job.repository_id),
         )
         if drift_summary.should_record:
             self.drift_event_repo.create(
@@ -108,4 +119,27 @@ class JobRunner:
                 "drift_severity": drift_summary.severity.value,
                 "drift_recorded": drift_summary.should_record,
             },
+        )
+
+    def _active_attention_profile_weights(self, repository_id: UUID) -> AttentionProfileWeights | None:
+        active_profile = self.attention_profile_repo.get_active_for_repository(repository_id)
+        if active_profile is None:
+            return None
+        return self._attention_profile_weights(active_profile)
+
+    @staticmethod
+    def _attention_profile_weights(
+        profile_with_focus_areas: AttentionProfileWithFocusAreas,
+    ) -> AttentionProfileWeights:
+        return AttentionProfileWeights(
+            name=profile_with_focus_areas.profile.name,
+            default_weight=profile_with_focus_areas.profile.default_weight,
+            focus_areas=[
+                AttentionFocusWeight(
+                    name=focus_area.name,
+                    weight=focus_area.weight,
+                    path_globs=focus_area.path_globs,
+                )
+                for focus_area in profile_with_focus_areas.focus_areas
+            ],
         )

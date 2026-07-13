@@ -57,6 +57,20 @@ List drift events for a repository:
 curl http://localhost:8080/repositories/{repository_id}/drift-events
 ```
 
+Create an active attention profile to weight drift by path:
+
+```bash
+curl -X POST http://localhost:8080/repositories/{repository_id}/attention-profiles \
+  -H "content-type: application/json" \
+  -d '{
+    "name": "Backend heavy",
+    "default_weight": "1.0",
+    "focus_areas": [
+      {"name": "API", "weight": "3.0", "path_globs": ["src/api/**", "src/ooh/api/**"]}
+    ]
+  }'
+```
+
 Repository registration stores metadata and enqueues an `ingest_repository` job. The worker
 expects local `source_uri` values to be paths visible inside the container. By default, Compose
 mounts the current project at `/workspace`; set
@@ -66,8 +80,8 @@ Compose mounts to `.ooh_cache/` in this project.
 
 The worker currently creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
-`docs/**`, and `adr/**`, records baseline and commit-to-commit drift events, and marks the
-repository indexed at the resolved commit SHA.
+`docs/**`, and `adr/**`, records baseline and commit-to-commit drift events using the active
+attention profile if one exists, and marks the repository indexed at the resolved commit SHA.
 
 Phase 1 is being implemented in reviewable components.
 
