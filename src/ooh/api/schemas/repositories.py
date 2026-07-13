@@ -1,10 +1,21 @@
 from datetime import datetime
+from decimal import Decimal
 from pathlib import PurePath
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
-from ooh.db.models import JobRead, JobStatus, JobType, RepositoryRead, RepositorySourceType, RepositoryStatus
+from ooh.db.models import (
+    DriftEventRead,
+    DriftSeverity,
+    JobRead,
+    JobStatus,
+    JobType,
+    RepositoryRead,
+    RepositorySourceType,
+    RepositoryStatus,
+)
 
 
 class RepositoryCreateRequest(BaseModel):
@@ -72,6 +83,32 @@ class JobResponse(BaseModel):
 class RepositoryRegistrationResponse(BaseModel):
     repository: RepositoryResponse
     ingest_job: JobResponse
+
+
+class DriftEventResponse(BaseModel):
+    id: UUID
+    repository_id: UUID
+    snapshot_id: UUID | None
+    from_commit_sha: str | None
+    to_commit_sha: str
+    drift_score: Decimal
+    severity: DriftSeverity
+    breakdown: dict[str, Any]
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, drift_event: DriftEventRead) -> "DriftEventResponse":
+        return cls(
+            id=drift_event.id,
+            repository_id=drift_event.repository_id,
+            snapshot_id=drift_event.snapshot_id,
+            from_commit_sha=drift_event.from_commit_sha,
+            to_commit_sha=drift_event.to_commit_sha,
+            drift_score=drift_event.drift_score,
+            severity=drift_event.severity,
+            breakdown=drift_event.breakdown,
+            created_at=drift_event.created_at,
+        )
 
 
 def infer_repository_name(source_uri: str) -> str:

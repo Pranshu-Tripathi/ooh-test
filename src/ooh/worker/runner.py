@@ -3,7 +3,8 @@ import logging
 from ooh.config import get_settings
 from ooh.db import Database
 from ooh.db.models import JobRead, JobStatus, JobType
-from ooh.db.repos import GuidanceSourceRepo, JobRepo, RepoSnapshotRepo, RepositoryRepo
+from ooh.db.repos import DriftEventRepo, GuidanceSourceRepo, JobRepo, RepoSnapshotRepo, RepositoryRepo
+from ooh.worker.drift_scorer import GitDriftScorer
 from ooh.worker.repository_inspector import LocalRepositoryInspector
 from ooh.worker.repository_source_resolver import RepositorySourceResolver
 
@@ -17,9 +18,11 @@ class JobRunner:
         self.job_repo = JobRepo(db)
         self.repository_repo = RepositoryRepo(db)
         self.repo_snapshot_repo = RepoSnapshotRepo(db)
+        self.drift_event_repo = DriftEventRepo(db)
         self.guidance_source_repo = GuidanceSourceRepo(db)
         self.repository_source_resolver = RepositorySourceResolver(cache_root=settings.cache_root)
         self.repository_inspector = LocalRepositoryInspector(cache_root=settings.cache_root)
+        self.drift_scorer = GitDriftScorer()
 
     def process_once(self) -> bool:
         job = self.job_repo.claim_next(worker_id=self.worker_id)
@@ -66,11 +69,26 @@ class JobRunner:
 
         resolved_source = self.repository_source_resolver.resolve(repository)
         snapshot = self.repository_inspector.inspect_path(repository, resolved_source.path)
-        self.repo_snapshot_repo.create(
+        snapshot_record = self.repo_snapshot_repo.create(
             repository_id=job.repository_id,
             commit_sha=snapshot.commit_sha,
             index_uri=snapshot.index_uri,
         )
+        drift_summary = self.drift_scorer.score(
+            resolved_source.path,
+            from_commit_sha=repository.last_processed_commit_sha,
+            to_commit_sha=snapshot.commit_sha,
+        )
+        if drift_summary.should_record:
+            self.drift_event_repo.create(
+                repository_id=job.repository_id,
+                snapshot_id=snapshot_record.id,
+                from_commit_sha=drift_summary.from_commit_sha,
+                to_commit_sha=drift_summary.to_commit_sha,
+                drift_score=drift_summary.drift_score,
+                severity=drift_summary.severity,
+                breakdown=drift_summary.breakdown,
+            )
         self.guidance_source_repo.replace_for_repository(
             job.repository_id,
             [
@@ -86,5 +104,8 @@ class JobRunner:
                 "commit_sha": snapshot.commit_sha,
                 "file_count": snapshot.file_count,
                 "guidance_source_count": len(snapshot.guidance_sources),
+                "drift_score": str(drift_summary.drift_score),
+                "drift_severity": drift_summary.severity.value,
+                "drift_recorded": drift_summary.should_record,
             },
         )

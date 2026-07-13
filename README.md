@@ -45,6 +45,18 @@ curl -X POST http://localhost:8080/repositories \
   -d '{"source_type":"github","source_uri":"https://github.com/owner/repo.git"}'
 ```
 
+Enqueue another ingest after new commits land:
+
+```bash
+curl -X POST http://localhost:8080/repositories/{repository_id}/ingest-jobs
+```
+
+List drift events for a repository:
+
+```bash
+curl http://localhost:8080/repositories/{repository_id}/drift-events
+```
+
 Repository registration stores metadata and enqueues an `ingest_repository` job. The worker
 expects local `source_uri` values to be paths visible inside the container. By default, Compose
 mounts the current project at `/workspace`; set
@@ -54,7 +66,8 @@ Compose mounts to `.ooh_cache/` in this project.
 
 The worker currently creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
-`docs/**`, and `adr/**`, and marks the repository indexed at the resolved commit SHA.
+`docs/**`, and `adr/**`, records baseline and commit-to-commit drift events, and marks the
+repository indexed at the resolved commit SHA.
 
 Phase 1 is being implemented in reviewable components.
 
