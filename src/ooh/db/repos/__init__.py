@@ -1,3 +1,10 @@
+from ooh.db.repos.agent_traces import (
+    AgentArtifactInput,
+    AgentRunInput,
+    AgentStepInput,
+    AgentTraceRepo,
+    ProvenanceRefInput,
+)
 from ooh.db.repos.attention_profiles import (
     AttentionFocusAreaInput,
     AttentionProfileRepo,
@@ -12,6 +19,10 @@ from ooh.db.repos.repo_snapshots import RepoSnapshotRepo
 from ooh.db.repos.repositories import RepositoryRepo
 
 __all__ = [
+    "AgentArtifactInput",
+    "AgentRunInput",
+    "AgentStepInput",
+    "AgentTraceRepo",
     "AttentionFocusAreaInput",
     "AttentionProfileRepo",
     "AttentionProfileWithFocusAreas",
@@ -23,6 +34,7 @@ __all__ = [
     "GeneratedTestRepo",
     "GuidanceSourceRepo",
     "JobRepo",
+    "ProvenanceRefInput",
     "RepoSnapshotRepo",
     "RepositoryRepo",
 ]

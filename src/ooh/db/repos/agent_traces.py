@@ -1,0 +1,233 @@
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+
+from ooh.db.connection import Database
+from ooh.db.models import (
+    AgentArtifact,
+    AgentArtifactRead,
+    AgentArtifactType,
+    AgentRun,
+    AgentRunRead,
+    AgentRunType,
+    AgentStatus,
+    AgentStep,
+    AgentStepRead,
+    AgentStepType,
+    ProvenanceRef,
+    ProvenanceRefRead,
+    ProvenanceRefType,
+)
+
+
+@dataclass(frozen=True)
+class AgentRunInput:
+    run_type: AgentRunType
+    job_id: UUID | None = None
+    repository_id: UUID | None = None
+    status: AgentStatus = AgentStatus.QUEUED
+    model_profile: str | None = None
+
+
+@dataclass(frozen=True)
+class AgentStepInput:
+    agent_run_id: UUID
+    step_type: AgentStepType
+    sequence: int
+    status: AgentStatus = AgentStatus.QUEUED
+    input_summary: dict[str, Any] = field(default_factory=dict)
+    output_summary: dict[str, Any] = field(default_factory=dict)
+    warning_summary: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class AgentArtifactInput:
+    agent_step_id: UUID
+    artifact_type: AgentArtifactType
+    artifact_uri: str
+    content_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class ProvenanceRefInput:
+    artifact_id: UUID
+    ref_type: ProvenanceRefType
+    ref_uri: str
+    content_hash: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+class AgentTraceRepo:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def create_run(self, input: AgentRunInput) -> AgentRunRead:
+        with self.db.session() as session:
+            run = AgentRun(
+                job_id=input.job_id,
+                repository_id=input.repository_id,
+                run_type=input.run_type,
+                status=input.status,
+                model_profile=input.model_profile,
+            )
+            session.add(run)
+            session.flush()
+            session.refresh(run)
+            return AgentRunRead.model_validate(run)
+
+    def get_run(self, run_id: UUID) -> AgentRunRead | None:
+        with self.db.session() as session:
+            run = session.get(AgentRun, run_id)
+            if run is None:
+                return None
+            return AgentRunRead.model_validate(run)
+
+    def list_runs_for_repository(
+        self,
+        repository_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> list[AgentRunRead]:
+        with self.db.session() as session:
+            runs = session.scalars(
+                select(AgentRun)
+                .where(AgentRun.repository_id == repository_id)
+                .order_by(AgentRun.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [AgentRunRead.model_validate(run) for run in runs]
+
+    def mark_run_running(self, run_id: UUID) -> AgentRunRead:
+        with self.db.session() as session:
+            run = session.get(AgentRun, run_id)
+            if run is None:
+                raise ValueError("agent run not found")
+
+            run.status = AgentStatus.RUNNING
+            run.started_at = run.started_at or datetime.now(UTC)
+            session.flush()
+            session.refresh(run)
+            return AgentRunRead.model_validate(run)
+
+    def mark_run_finished(self, run_id: UUID, *, status: AgentStatus) -> AgentRunRead:
+        with self.db.session() as session:
+            run = session.get(AgentRun, run_id)
+            if run is None:
+                raise ValueError("agent run not found")
+
+            run.status = status
+            run.finished_at = datetime.now(UTC)
+            session.flush()
+            session.refresh(run)
+            return AgentRunRead.model_validate(run)
+
+    def create_step(self, input: AgentStepInput) -> AgentStepRead:
+        with self.db.session() as session:
+            step = AgentStep(
+                agent_run_id=input.agent_run_id,
+                step_type=input.step_type,
+                status=input.status,
+                sequence=input.sequence,
+                input_summary=input.input_summary,
+                output_summary=input.output_summary,
+                warning_summary=input.warning_summary,
+            )
+            session.add(step)
+            session.flush()
+            session.refresh(step)
+            return AgentStepRead.model_validate(step)
+
+    def list_steps_for_run(self, agent_run_id: UUID) -> list[AgentStepRead]:
+        with self.db.session() as session:
+            steps = session.scalars(
+                select(AgentStep)
+                .where(AgentStep.agent_run_id == agent_run_id)
+                .order_by(AgentStep.sequence)
+            ).all()
+            return [AgentStepRead.model_validate(step) for step in steps]
+
+    def mark_step_running(self, step_id: UUID) -> AgentStepRead:
+        with self.db.session() as session:
+            step = session.get(AgentStep, step_id)
+            if step is None:
+                raise ValueError("agent step not found")
+
+            step.status = AgentStatus.RUNNING
+            step.started_at = step.started_at or datetime.now(UTC)
+            session.flush()
+            session.refresh(step)
+            return AgentStepRead.model_validate(step)
+
+    def mark_step_finished(
+        self,
+        step_id: UUID,
+        *,
+        status: AgentStatus,
+        output_summary: dict[str, Any] | None = None,
+        warning_summary: list[dict[str, Any]] | None = None,
+    ) -> AgentStepRead:
+        with self.db.session() as session:
+            step = session.get(AgentStep, step_id)
+            if step is None:
+                raise ValueError("agent step not found")
+
+            step.status = status
+            if output_summary is not None:
+                step.output_summary = output_summary
+            if warning_summary is not None:
+                step.warning_summary = warning_summary
+            step.finished_at = datetime.now(UTC)
+            session.flush()
+            session.refresh(step)
+            return AgentStepRead.model_validate(step)
+
+    def create_artifact(self, input: AgentArtifactInput) -> AgentArtifactRead:
+        with self.db.session() as session:
+            artifact = AgentArtifact(
+                agent_step_id=input.agent_step_id,
+                artifact_type=input.artifact_type,
+                artifact_uri=input.artifact_uri,
+                content_hash=input.content_hash,
+            )
+            session.add(artifact)
+            session.flush()
+            session.refresh(artifact)
+            return AgentArtifactRead.model_validate(artifact)
+
+    def list_artifacts_for_step(self, agent_step_id: UUID) -> list[AgentArtifactRead]:
+        with self.db.session() as session:
+            artifacts = session.scalars(
+                select(AgentArtifact)
+                .where(AgentArtifact.agent_step_id == agent_step_id)
+                .order_by(AgentArtifact.created_at)
+            ).all()
+            return [AgentArtifactRead.model_validate(artifact) for artifact in artifacts]
+
+    def create_provenance_ref(self, input: ProvenanceRefInput) -> ProvenanceRefRead:
+        with self.db.session() as session:
+            provenance_ref = ProvenanceRef(
+                artifact_id=input.artifact_id,
+                ref_type=input.ref_type,
+                ref_uri=input.ref_uri,
+                content_hash=input.content_hash,
+                metadata_=input.metadata,
+            )
+            session.add(provenance_ref)
+            session.flush()
+            session.refresh(provenance_ref)
+            return ProvenanceRefRead.model_validate(provenance_ref)
+
+    def list_provenance_refs_for_artifact(self, artifact_id: UUID) -> list[ProvenanceRefRead]:
+        with self.db.session() as session:
+            provenance_refs = session.scalars(
+                select(ProvenanceRef)
+                .where(ProvenanceRef.artifact_id == artifact_id)
+                .order_by(ProvenanceRef.created_at)
+            ).all()
+            return [
+                ProvenanceRefRead.model_validate(provenance_ref)
+                for provenance_ref in provenance_refs
+            ]
