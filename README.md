@@ -19,7 +19,8 @@ Start Compose with the built-in local defaults:
 docker compose up --build
 ```
 
-Optionally copy `.env.example` to `.env` if you want to override ports, model names, or local paths.
+Optionally copy `.env.example` to `.env` if you want to override ports, model names, or
+the read-only repository mount used by the worker.
 
 Useful endpoints once the API is running:
 
@@ -33,10 +34,17 @@ Register a local repository:
 ```bash
 curl -X POST http://localhost:8080/repositories \
   -H "content-type: application/json" \
-  -d '{"source_type":"local_path","source_uri":"/path/to/repo"}'
+  -d '{"source_type":"local_path","source_uri":"/workspace"}'
 ```
 
-Repository registration stores metadata and enqueues an `ingest_repository` job. The worker will process that job in a later Phase 1 slice.
+Repository registration stores metadata and enqueues an `ingest_repository` job. The worker
+expects `source_uri` to be the path visible inside the container. By default, Compose mounts the
+current project at `/workspace`; set `OOH_REPOSITORY_MOUNT=/host/path:/workspace:ro` in `.env`
+to inspect a different local repository.
+
+The worker currently creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
+`repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
+`docs/**`, and `adr/**`, and marks the repository indexed at the resolved commit SHA.
 
 Phase 1 is being implemented in reviewable components. The current component only establishes the application scaffold and Compose runtime.
 

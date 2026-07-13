@@ -95,6 +95,14 @@ class RepositoryRepo:
     def mark_indexed(self, repository_id: UUID) -> RepositoryRead:
         return self.update_status(repository_id, RepositoryStatus.INDEXED, last_indexed_at=datetime.now(UTC))
 
+    def mark_indexed_at_commit(self, repository_id: UUID, *, commit_sha: str) -> RepositoryRead:
+        return self.update_status(
+            repository_id,
+            RepositoryStatus.INDEXED,
+            last_indexed_at=datetime.now(UTC),
+            last_processed_commit_sha=commit_sha,
+        )
+
     def mark_failed(self, repository_id: UUID) -> RepositoryRead:
         return self.update_status(repository_id, RepositoryStatus.FAILED)
 
@@ -104,6 +112,7 @@ class RepositoryRepo:
         status: RepositoryStatus,
         *,
         last_indexed_at: datetime | None = None,
+        last_processed_commit_sha: str | None = None,
     ) -> RepositoryRead:
         now = datetime.now(UTC)
 
@@ -116,6 +125,8 @@ class RepositoryRepo:
             repository.updated_at = now
             if last_indexed_at is not None:
                 repository.last_indexed_at = last_indexed_at
+            if last_processed_commit_sha is not None:
+                repository.last_processed_commit_sha = last_processed_commit_sha
             session.flush()
             session.refresh(repository)
             return RepositoryRead.model_validate(repository)
