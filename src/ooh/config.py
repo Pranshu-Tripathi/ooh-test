@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: int = Field(default=5, ge=1)
     database_url: str = "postgresql://ooh:ooh@localhost:5432/ooh"
     cache_root: Path = Path("/ooh_cache")
+    model_provider: str = "ollama"
     ollama_base_url: str = "http://host.docker.internal:11434"
     test_generator_model: str = "qwen3-coder:8b"
     answer_judge_model: str = "deepseek-r1:8b"

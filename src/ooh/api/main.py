@@ -41,6 +41,7 @@ def runtime() -> dict[str, str]:
     return {
         "env": settings.env,
         "cache_root": str(settings.cache_root),
+        "model_provider": settings.model_provider,
         "ollama_base_url": settings.ollama_base_url,
         "test_generator_model": settings.test_generator_model,
         "answer_judge_model": settings.answer_judge_model,
