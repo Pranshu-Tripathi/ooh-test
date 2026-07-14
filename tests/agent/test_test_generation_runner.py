@@ -34,16 +34,18 @@ from ooh.db.repos import (
 
 
 class FakeProvider:
-    def __init__(self, content: str) -> None:
-        self.content = content
+    def __init__(self, content: str | list[str]) -> None:
+        self.contents = [content] if isinstance(content, str) else content
         self.requests: list[ModelRequest] = []
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
+        index = min(len(self.requests) - 1, len(self.contents) - 1)
+        content = self.contents[index]
         return ModelResponse(
             model=request.model,
-            content=self.content,
-            raw_response={"message": {"content": self.content}},
+            content=content,
+            raw_response={"message": {"content": content}},
             finish_reason="stop",
         )
 
@@ -258,6 +260,45 @@ def test_generated_test_run_service_marks_run_failed_on_invalid_model_output(tmp
 
     assert list(trace_repo.runs.values())[0].status == AgentStatus.FAILED
     assert any(step.status == AgentStatus.FAILED for step in trace_repo.steps.values())
+
+
+def test_generated_test_run_service_records_repair_turn_artifacts(tmp_path) -> None:
+    trace_repo = FakeAgentTraceRepo()
+    generated_test_repo = FakeGeneratedTestRepo()
+    service = GeneratedTestRunService(
+        provider=FakeProvider(
+            [
+                '{"type": "short_answer", "question": "Missing answer"}',
+                json.dumps(
+                    {
+                        "type": "short_answer",
+                        "question": "What matters?",
+                        "expected_answer": "The evidence matters.",
+                    }
+                ),
+            ]
+        ),
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=generated_test_repo,
+    )
+
+    result = service.generate_for_context_packs([build_context_pack(tmp_path)])
+
+    assert result.agent_run.status == AgentStatus.SUCCEEDED
+    assert [request.metadata.get("repair") for request in service.provider.requests] == [None, True]
+    assert [artifact.artifact_type for artifact in trace_repo.artifacts] == [
+        AgentArtifactType.PROMPT,
+        AgentArtifactType.RAW_MODEL_RESPONSE,
+        AgentArtifactType.TRACE,
+        AgentArtifactType.PROMPT,
+        AgentArtifactType.RAW_MODEL_RESPONSE,
+        AgentArtifactType.VALIDATED_OUTPUT,
+    ]
+    artifact_names = [artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts]
+    assert any("turn-1-generate-validation-error" in name for name in artifact_names)
+    assert any("turn-2-repair-prompt" in name for name in artifact_names)
 
 
 def test_generated_test_run_service_does_not_fail_generation_step_when_persist_fails(tmp_path) -> None:

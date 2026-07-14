@@ -23,22 +23,103 @@ class GeneratedTestCandidate:
     prompt_version: str
 
 
+@dataclass(frozen=True)
+class GeneratedTestLoopTurn:
+    sequence: int
+    action: str
+    request: ModelRequest
+    model_response: ModelResponse
+    validation_error: str | None
+    payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class GeneratedTestLoopResult:
+    payload: dict[str, Any]
+    turns: list[GeneratedTestLoopTurn]
+    prompt_version: str
+
+
+class GeneratedTestAgentLoop:
+    def __init__(
+        self,
+        provider: ModelProvider,
+        *,
+        model: str,
+        max_repair_attempts: int = 1,
+    ) -> None:
+        if max_repair_attempts < 0:
+            raise ValueError("max_repair_attempts must be non-negative")
+        self.provider = provider
+        self.model = model
+        self.max_repair_attempts = max_repair_attempts
+
+    def run(self, context_pack: dict[str, Any]) -> GeneratedTestLoopResult:
+        turns: list[GeneratedTestLoopTurn] = []
+        request = build_test_generation_request(model=self.model, context_pack=context_pack)
+        action = "generate"
+
+        for sequence in range(1, self.max_repair_attempts + 2):
+            response = self.provider.generate(request)
+            try:
+                payload = parse_generated_test_payload(response.content)
+            except GeneratedTestPayloadError as exc:
+                validation_error = str(exc)
+                turns.append(
+                    GeneratedTestLoopTurn(
+                        sequence=sequence,
+                        action=action,
+                        request=request,
+                        model_response=response,
+                        validation_error=validation_error,
+                        payload=None,
+                    )
+                )
+                if sequence > self.max_repair_attempts:
+                    raise GeneratedTestPayloadError(
+                        f"model output did not become valid after {sequence} attempts: {validation_error}"
+                    ) from exc
+                request = build_test_generation_repair_request(
+                    model=self.model,
+                    context_pack=context_pack,
+                    invalid_output=response.content,
+                    validation_error=validation_error,
+                )
+                action = "repair"
+                continue
+
+            turns.append(
+                GeneratedTestLoopTurn(
+                    sequence=sequence,
+                    action=action,
+                    request=request,
+                    model_response=response,
+                    validation_error=None,
+                    payload=payload,
+                )
+            )
+            return GeneratedTestLoopResult(
+                payload=payload,
+                turns=turns,
+                prompt_version=TEST_GENERATION_PROMPT_VERSION,
+            )
+
+        raise GeneratedTestPayloadError("model output did not produce a valid payload")
+
+
 class GeneratedTestPipeline:
     def __init__(self, provider: ModelProvider, *, model: str) -> None:
         self.provider = provider
         self.model = model
 
     def generate_from_context_pack(self, context_pack: dict[str, Any]) -> GeneratedTestCandidate:
-        request = build_test_generation_request(
-            model=self.model,
-            context_pack=context_pack,
-        )
-        response = self.provider.generate(request)
-        payload = parse_generated_test_payload(response.content)
+        loop = GeneratedTestAgentLoop(self.provider, model=self.model, max_repair_attempts=0)
+        result = loop.run(context_pack)
+        final_turn = result.turns[-1]
         return GeneratedTestCandidate(
-            payload=payload,
-            model_response=response,
-            prompt_version=TEST_GENERATION_PROMPT_VERSION,
+            payload=result.payload,
+            model_response=final_turn.model_response,
+            prompt_version=result.prompt_version,
         )
 
 
@@ -67,6 +148,41 @@ def build_test_generation_request(*, model: str, context_pack: dict[str, Any]) -
             ),
         ],
         metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION},
+    )
+
+
+def build_test_generation_repair_request(
+    *,
+    model: str,
+    context_pack: dict[str, Any],
+    invalid_output: str,
+    validation_error: str,
+) -> ModelRequest:
+    return ModelRequest(
+        model=model,
+        response_format="json_object",
+        temperature=0,
+        messages=[
+            ModelMessage(
+                role="system",
+                content=(
+                    "You repair generated repository-understanding test JSON. "
+                    "Return exactly one corrected JSON object and no prose. The JSON must match "
+                    "one of these types: short_answer, mcq_single, mcq_multi."
+                ),
+            ),
+            ModelMessage(
+                role="user",
+                content=(
+                    "The previous model output failed validation. Repair it using the "
+                    "validation error and context pack below.\n\n"
+                    f"Validation error:\n{validation_error}\n\n"
+                    f"Invalid output:\n{invalid_output}\n\n"
+                    f"Context pack:\n{json.dumps(context_pack, indent=2, sort_keys=True)}"
+                ),
+            ),
+        ],
+        metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION, "repair": True},
     )
 
 

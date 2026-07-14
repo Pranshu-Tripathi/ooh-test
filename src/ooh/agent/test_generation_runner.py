@@ -9,9 +9,8 @@ from uuid import UUID
 from ooh.agent.artifacts import AgentArtifactStore
 from ooh.agent.providers import ModelProvider
 from ooh.agent.test_generation import (
-    TEST_GENERATION_PROMPT_VERSION,
-    build_test_generation_request,
-    parse_generated_test_payload,
+    GeneratedTestAgentLoop,
+    GeneratedTestLoopTurn,
 )
 from ooh.db.models import (
     AgentArtifactRead,
@@ -59,6 +58,7 @@ class GeneratedTestRunService:
         self.artifact_store = artifact_store
         self.agent_trace_repo = agent_trace_repo
         self.generated_test_repo = generated_test_repo
+        self.agent_loop = GeneratedTestAgentLoop(provider, model=model)
 
     def generate_for_context_packs(
         self,
@@ -119,35 +119,14 @@ class GeneratedTestRunService:
         context_pack: ContextPackWithSources,
     ) -> GeneratedTestInput:
         context_pack_payload = self._read_context_pack(context_pack.context_pack.artifact_uri)
-        request = build_test_generation_request(model=self.model, context_pack=context_pack_payload)
-        prompt_artifact = self._write_prompt_artifact(
+        loop_result = self.agent_loop.run(context_pack_payload)
+        prompt_artifact = self._write_turn_artifacts(
             agent_run_id=agent_run_id,
             generation_step_id=generation_step.id,
             context_pack_id=context_pack.context_pack.id,
-            request_payload={
-                "model": request.model,
-                "messages": [
-                    {"role": message.role, "content": message.content}
-                    for message in request.messages
-                ],
-                "response_format": request.response_format,
-                "temperature": request.temperature,
-                "metadata": request.metadata,
-            },
+            turns=loop_result.turns,
         )
-        model_response = self.provider.generate(request)
-        self._write_raw_response_artifact(
-            agent_run_id=agent_run_id,
-            generation_step_id=generation_step.id,
-            context_pack_id=context_pack.context_pack.id,
-            response_payload={
-                "model": model_response.model,
-                "content": model_response.content,
-                "finish_reason": model_response.finish_reason,
-                "raw_response": model_response.raw_response,
-            },
-        )
-        normalized_payload = parse_generated_test_payload(model_response.content)
+        normalized_payload = loop_result.payload
         validated_artifact = self._write_validated_output_artifact(
             agent_run_id=agent_run_id,
             generation_step_id=generation_step.id,
@@ -158,7 +137,7 @@ class GeneratedTestRunService:
             validated_artifact=validated_artifact,
             prompt_artifact=prompt_artifact,
             context_pack=context_pack,
-            model=model_response.model,
+            model=loop_result.turns[-1].model_response.model,
         )
 
         return GeneratedTestInput(
@@ -170,8 +149,59 @@ class GeneratedTestRunService:
             category=GeneratedTestCategory(context_pack.context_pack.pack_type.value),
             test_payload=normalized_payload,
             evidence_refs=normalized_payload.get("evidence_refs", []),
-            prompt_version=TEST_GENERATION_PROMPT_VERSION,
+            prompt_version=loop_result.prompt_version,
         )
+
+    def _write_turn_artifacts(
+        self,
+        *,
+        agent_run_id: UUID,
+        generation_step_id: UUID,
+        context_pack_id: UUID,
+        turns: list[GeneratedTestLoopTurn],
+    ) -> AgentArtifactRead:
+        prompt_artifact: AgentArtifactRead | None = None
+        for turn in turns:
+            prompt_artifact = self._write_prompt_artifact(
+                agent_run_id=agent_run_id,
+                generation_step_id=generation_step_id,
+                context_pack_id=context_pack_id,
+                turn=turn,
+                request_payload={
+                    "model": turn.request.model,
+                    "messages": [
+                        {"role": message.role, "content": message.content}
+                        for message in turn.request.messages
+                    ],
+                    "response_format": turn.request.response_format,
+                    "temperature": turn.request.temperature,
+                    "metadata": turn.request.metadata,
+                },
+            )
+            self._write_raw_response_artifact(
+                agent_run_id=agent_run_id,
+                generation_step_id=generation_step_id,
+                context_pack_id=context_pack_id,
+                turn=turn,
+                response_payload={
+                    "model": turn.model_response.model,
+                    "content": turn.model_response.content,
+                    "finish_reason": turn.model_response.finish_reason,
+                    "raw_response": turn.model_response.raw_response,
+                    "validation_error": turn.validation_error,
+                },
+            )
+            if turn.validation_error is not None:
+                self._write_validation_error_artifact(
+                    agent_run_id=agent_run_id,
+                    generation_step_id=generation_step_id,
+                    context_pack_id=context_pack_id,
+                    turn=turn,
+                )
+
+        if prompt_artifact is None:
+            raise ValueError("agent loop produced no turns")
+        return prompt_artifact
 
     def _write_prompt_artifact(
         self,
@@ -179,11 +209,12 @@ class GeneratedTestRunService:
         agent_run_id: UUID,
         generation_step_id: UUID,
         context_pack_id: UUID,
+        turn: GeneratedTestLoopTurn,
         request_payload: dict[str, Any],
     ) -> AgentArtifactRead:
         stored_artifact = self.artifact_store.write_json(
             agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-prompt.json",
+            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-prompt.json",
             payload=request_payload,
         )
         return self.agent_trace_repo.create_artifact(
@@ -201,17 +232,44 @@ class GeneratedTestRunService:
         agent_run_id: UUID,
         generation_step_id: UUID,
         context_pack_id: UUID,
+        turn: GeneratedTestLoopTurn,
         response_payload: dict[str, Any],
     ) -> AgentArtifactRead:
         stored_artifact = self.artifact_store.write_json(
             agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-raw-response.json",
+            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-raw-response.json",
             payload=response_payload,
         )
         return self.agent_trace_repo.create_artifact(
             AgentArtifactInput(
                 agent_step_id=generation_step_id,
                 artifact_type=AgentArtifactType.RAW_MODEL_RESPONSE,
+                artifact_uri=stored_artifact.artifact_uri,
+                content_hash=stored_artifact.content_hash,
+            )
+        )
+
+    def _write_validation_error_artifact(
+        self,
+        *,
+        agent_run_id: UUID,
+        generation_step_id: UUID,
+        context_pack_id: UUID,
+        turn: GeneratedTestLoopTurn,
+    ) -> AgentArtifactRead:
+        stored_artifact = self.artifact_store.write_json(
+            agent_run_id=agent_run_id,
+            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-validation-error.json",
+            payload={
+                "turn_sequence": turn.sequence,
+                "action": turn.action,
+                "validation_error": turn.validation_error,
+            },
+        )
+        return self.agent_trace_repo.create_artifact(
+            AgentArtifactInput(
+                agent_step_id=generation_step_id,
+                artifact_type=AgentArtifactType.TRACE,
                 artifact_uri=stored_artifact.artifact_uri,
                 content_hash=stored_artifact.content_hash,
             )
