@@ -6,13 +6,16 @@ import pytest
 from ooh.agent.providers import ModelRequest, ModelResponse
 from ooh.agent.test_generation import (
     GeneratedTestAgentLoop,
+    GeneratedTestEvidenceError,
     GeneratedTestPayloadError,
     GeneratedTestPipeline,
+    build_test_generation_evidence_feedback_request,
     build_test_generation_repair_request,
     build_test_generation_request,
     extract_json_object,
     parse_generated_test_payload,
 )
+from ooh.agent.evidence import verify_generated_test_evidence
 
 
 class FakeProvider:
@@ -53,6 +56,29 @@ def test_build_test_generation_repair_request_includes_error_and_invalid_output(
     assert request.metadata["repair"] is True
     assert "expected_answer missing" in request.messages[1].content
     assert '{"type": "short_answer"}' in request.messages[1].content
+
+
+def test_build_test_generation_evidence_feedback_request_includes_rejected_refs() -> None:
+    invalid_payload = {
+        "type": "short_answer",
+        "question": "What changed?",
+        "expected_answer": "The missing file changed.",
+        "evidence_refs": [{"source_type": "code", "source_uri": "code:missing.py"}],
+    }
+    context_pack = {"source_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}]}
+    evidence_result = verify_generated_test_evidence(invalid_payload, context_pack)
+
+    request = build_test_generation_evidence_feedback_request(
+        model="qwen3-coder:8b",
+        context_pack=context_pack,
+        invalid_payload=invalid_payload,
+        evidence_result=evidence_result,
+    )
+
+    assert request.response_format == "json_object"
+    assert request.metadata["evidence_feedback"] is True
+    assert "code:missing.py" in request.messages[1].content
+    assert "code:src/app.py" in request.messages[1].content
 
 
 def test_extract_json_object_from_fenced_output() -> None:
@@ -152,6 +178,74 @@ def test_agent_loop_fails_after_repair_budget() -> None:
 
     with pytest.raises(GeneratedTestPayloadError, match="after 2 attempts"):
         loop.run({"pack_type": "active_pr"})
+
+    assert len(provider.requests) == 2
+
+
+def test_agent_loop_regenerates_invalid_evidence_refs() -> None:
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "What changed?",
+                    "expected_answer": "The missing file changed.",
+                    "evidence_refs": [{"source_type": "code", "source_uri": "code:missing.py"}],
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "What changed?",
+                    "expected_answer": "src/app.py changed.",
+                    "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+                }
+            ),
+        ]
+    )
+    loop = GeneratedTestAgentLoop(provider, model="qwen3-coder:8b")
+
+    result = loop.run(
+        {
+            "pack_type": "active_pr",
+            "source_refs": [
+                {
+                    "source_type": "code",
+                    "source_uri": "code:src/app.py",
+                    "content_hash": "code-hash",
+                }
+            ],
+        }
+    )
+
+    assert result.payload["expected_answer"] == "src/app.py changed."
+    assert result.payload["evidence_refs"][0]["content_hash"] == "code-hash"
+    assert [turn.action for turn in result.turns] == ["generate", "regenerate_evidence"]
+    assert result.turns[0].evidence_error is not None
+    assert result.turns[1].evidence_error is None
+    assert provider.requests[1].metadata["evidence_feedback"] is True
+
+
+def test_agent_loop_fails_after_evidence_regeneration_budget() -> None:
+    provider = FakeProvider(
+        json.dumps(
+            {
+                "type": "short_answer",
+                "question": "What changed?",
+                "expected_answer": "The missing file changed.",
+                "evidence_refs": [{"source_type": "code", "source_uri": "code:missing.py"}],
+            }
+        )
+    )
+    loop = GeneratedTestAgentLoop(provider, model="qwen3-coder:8b", max_evidence_regenerations=1)
+
+    with pytest.raises(GeneratedTestEvidenceError, match="after 2 attempts"):
+        loop.run(
+            {
+                "pack_type": "active_pr",
+                "source_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+            }
+        )
 
     assert len(provider.requests) == 2
 

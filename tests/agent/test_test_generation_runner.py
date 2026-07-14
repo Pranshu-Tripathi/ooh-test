@@ -274,6 +274,7 @@ def test_generated_test_run_service_records_repair_turn_artifacts(tmp_path) -> N
                         "type": "short_answer",
                         "question": "What matters?",
                         "expected_answer": "The evidence matters.",
+                        "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
                     }
                 ),
             ]
@@ -301,6 +302,64 @@ def test_generated_test_run_service_records_repair_turn_artifacts(tmp_path) -> N
     assert any("turn-2-repair-prompt" in name for name in artifact_names)
 
 
+def test_generated_test_run_service_records_evidence_regeneration_artifacts(tmp_path) -> None:
+    trace_repo = FakeAgentTraceRepo()
+    generated_test_repo = FakeGeneratedTestRepo()
+    service = GeneratedTestRunService(
+        provider=FakeProvider(
+            [
+                json.dumps(
+                    {
+                        "type": "short_answer",
+                        "question": "What matters?",
+                        "expected_answer": "The missing file matters.",
+                        "evidence_refs": [{"source_type": "code", "source_uri": "code:missing.py"}],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "short_answer",
+                        "question": "What matters?",
+                        "expected_answer": "src/app.py matters.",
+                        "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+                    }
+                ),
+            ]
+        ),
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=generated_test_repo,
+    )
+
+    result = service.generate_for_context_packs([build_context_pack(tmp_path)])
+
+    assert result.agent_run.status == AgentStatus.SUCCEEDED
+    assert [request.metadata.get("evidence_feedback") for request in service.provider.requests] == [
+        None,
+        True,
+    ]
+    assert generated_test_repo.inputs[0].evidence_refs == [
+        {
+            "source_type": "code",
+            "source_uri": "code:src/app.py",
+            "content_hash": "code-hash",
+            "metadata": {},
+        }
+    ]
+    assert [artifact.artifact_type for artifact in trace_repo.artifacts] == [
+        AgentArtifactType.PROMPT,
+        AgentArtifactType.RAW_MODEL_RESPONSE,
+        AgentArtifactType.TRACE,
+        AgentArtifactType.PROMPT,
+        AgentArtifactType.RAW_MODEL_RESPONSE,
+        AgentArtifactType.VALIDATED_OUTPUT,
+    ]
+    artifact_names = [artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts]
+    assert any("turn-1-generate-evidence-error" in name for name in artifact_names)
+    assert any("turn-2-regenerate_evidence-prompt" in name for name in artifact_names)
+
+
 def test_generated_test_run_service_does_not_fail_generation_step_when_persist_fails(tmp_path) -> None:
     trace_repo = FakeAgentTraceRepo()
     service = GeneratedTestRunService(
@@ -310,6 +369,7 @@ def test_generated_test_run_service_does_not_fail_generation_step_when_persist_f
                     "type": "short_answer",
                     "question": "What matters?",
                     "expected_answer": "The evidence matters.",
+                    "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
                 }
             )
         ),
@@ -351,7 +411,13 @@ def build_context_pack(tmp_path) -> ContextPackWithSources:
             {
                 "pack_type": "active_pr",
                 "drift": {"id": str(context_pack_drift_id())},
-                "source_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+                "source_refs": [
+                    {
+                        "source_type": "code",
+                        "source_uri": "code:src/app.py",
+                        "content_hash": "code-hash",
+                    }
+                ],
             }
         ),
         encoding="utf-8",

@@ -189,10 +189,21 @@ class GeneratedTestRunService:
                     "finish_reason": turn.model_response.finish_reason,
                     "raw_response": turn.model_response.raw_response,
                     "validation_error": turn.validation_error,
+                    "evidence_error": turn.evidence_error,
+                    "evidence_result": (
+                        turn.evidence_result.to_dict() if turn.evidence_result is not None else None
+                    ),
                 },
             )
             if turn.validation_error is not None:
                 self._write_validation_error_artifact(
+                    agent_run_id=agent_run_id,
+                    generation_step_id=generation_step_id,
+                    context_pack_id=context_pack_id,
+                    turn=turn,
+                )
+            if turn.evidence_error is not None:
+                self._write_evidence_error_artifact(
                     agent_run_id=agent_run_id,
                     generation_step_id=generation_step_id,
                     context_pack_id=context_pack_id,
@@ -264,6 +275,35 @@ class GeneratedTestRunService:
                 "turn_sequence": turn.sequence,
                 "action": turn.action,
                 "validation_error": turn.validation_error,
+            },
+        )
+        return self.agent_trace_repo.create_artifact(
+            AgentArtifactInput(
+                agent_step_id=generation_step_id,
+                artifact_type=AgentArtifactType.TRACE,
+                artifact_uri=stored_artifact.artifact_uri,
+                content_hash=stored_artifact.content_hash,
+            )
+        )
+
+    def _write_evidence_error_artifact(
+        self,
+        *,
+        agent_run_id: UUID,
+        generation_step_id: UUID,
+        context_pack_id: UUID,
+        turn: GeneratedTestLoopTurn,
+    ) -> AgentArtifactRead:
+        stored_artifact = self.artifact_store.write_json(
+            agent_run_id=agent_run_id,
+            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-evidence-error.json",
+            payload={
+                "turn_sequence": turn.sequence,
+                "action": turn.action,
+                "evidence_error": turn.evidence_error,
+                "evidence_result": (
+                    turn.evidence_result.to_dict() if turn.evidence_result is not None else None
+                ),
             },
         )
         return self.agent_trace_repo.create_artifact(

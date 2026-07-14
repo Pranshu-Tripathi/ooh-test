@@ -7,12 +7,17 @@ from typing import Any
 from pydantic import ValidationError
 
 from ooh.agent.contracts import normalize_generated_test_payload
+from ooh.agent.evidence import EvidenceVerificationResult, verify_generated_test_evidence
 from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, ModelResponse
 
 TEST_GENERATION_PROMPT_VERSION = "test-generation-v1"
 
 
 class GeneratedTestPayloadError(RuntimeError):
+    pass
+
+
+class GeneratedTestEvidenceError(RuntimeError):
     pass
 
 
@@ -31,6 +36,8 @@ class GeneratedTestLoopTurn:
     model_response: ModelResponse
     validation_error: str | None
     payload: dict[str, Any] | None
+    evidence_error: str | None = None
+    evidence_result: EvidenceVerificationResult | None = None
 
 
 @dataclass(frozen=True)
@@ -47,19 +54,27 @@ class GeneratedTestAgentLoop:
         *,
         model: str,
         max_repair_attempts: int = 1,
+        max_evidence_regenerations: int = 1,
     ) -> None:
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be non-negative")
+        if max_evidence_regenerations < 0:
+            raise ValueError("max_evidence_regenerations must be non-negative")
         self.provider = provider
         self.model = model
         self.max_repair_attempts = max_repair_attempts
+        self.max_evidence_regenerations = max_evidence_regenerations
 
     def run(self, context_pack: dict[str, Any]) -> GeneratedTestLoopResult:
         turns: list[GeneratedTestLoopTurn] = []
         request = build_test_generation_request(model=self.model, context_pack=context_pack)
         action = "generate"
+        sequence = 0
+        repair_attempts = 0
+        evidence_regenerations = 0
 
-        for sequence in range(1, self.max_repair_attempts + 2):
+        while True:
+            sequence += 1
             response = self.provider.generate(request)
             try:
                 payload = parse_generated_test_payload(response.content)
@@ -75,10 +90,11 @@ class GeneratedTestAgentLoop:
                         payload=None,
                     )
                 )
-                if sequence > self.max_repair_attempts:
+                if repair_attempts >= self.max_repair_attempts:
                     raise GeneratedTestPayloadError(
                         f"model output did not become valid after {sequence} attempts: {validation_error}"
                     ) from exc
+                repair_attempts += 1
                 request = build_test_generation_repair_request(
                     model=self.model,
                     context_pack=context_pack,
@@ -88,6 +104,36 @@ class GeneratedTestAgentLoop:
                 action = "repair"
                 continue
 
+            evidence_result = verify_generated_test_evidence(payload, context_pack)
+            if not evidence_result.is_valid:
+                evidence_error = evidence_result.error_message()
+                turns.append(
+                    GeneratedTestLoopTurn(
+                        sequence=sequence,
+                        action=action,
+                        request=request,
+                        model_response=response,
+                        validation_error=None,
+                        payload=payload,
+                        evidence_error=evidence_error,
+                        evidence_result=evidence_result,
+                    )
+                )
+                if evidence_regenerations >= self.max_evidence_regenerations:
+                    raise GeneratedTestEvidenceError(
+                        "model output did not reference valid evidence after "
+                        f"{sequence} attempts: {evidence_error}"
+                    )
+                evidence_regenerations += 1
+                request = build_test_generation_evidence_feedback_request(
+                    model=self.model,
+                    context_pack=context_pack,
+                    invalid_payload=payload,
+                    evidence_result=evidence_result,
+                )
+                action = "regenerate_evidence"
+                continue
+
             turns.append(
                 GeneratedTestLoopTurn(
                     sequence=sequence,
@@ -95,16 +141,15 @@ class GeneratedTestAgentLoop:
                     request=request,
                     model_response=response,
                     validation_error=None,
-                    payload=payload,
+                    payload=evidence_result.payload,
+                    evidence_result=evidence_result,
                 )
             )
             return GeneratedTestLoopResult(
-                payload=payload,
+                payload=evidence_result.payload,
                 turns=turns,
                 prompt_version=TEST_GENERATION_PROMPT_VERSION,
             )
-
-        raise GeneratedTestPayloadError("model output did not produce a valid payload")
 
 
 class GeneratedTestPipeline:
@@ -113,7 +158,12 @@ class GeneratedTestPipeline:
         self.model = model
 
     def generate_from_context_pack(self, context_pack: dict[str, Any]) -> GeneratedTestCandidate:
-        loop = GeneratedTestAgentLoop(self.provider, model=self.model, max_repair_attempts=0)
+        loop = GeneratedTestAgentLoop(
+            self.provider,
+            model=self.model,
+            max_repair_attempts=0,
+            max_evidence_regenerations=0,
+        )
         result = loop.run(context_pack)
         final_turn = result.turns[-1]
         return GeneratedTestCandidate(
@@ -183,6 +233,42 @@ def build_test_generation_repair_request(
             ),
         ],
         metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION, "repair": True},
+    )
+
+
+def build_test_generation_evidence_feedback_request(
+    *,
+    model: str,
+    context_pack: dict[str, Any],
+    invalid_payload: dict[str, Any],
+    evidence_result: EvidenceVerificationResult,
+) -> ModelRequest:
+    return ModelRequest(
+        model=model,
+        response_format="json_object",
+        temperature=0.2,
+        messages=[
+            ModelMessage(
+                role="system",
+                content=(
+                    "You regenerate repository-understanding test JSON when evidence refs are "
+                    "missing or unsupported. Return exactly one JSON object and no prose. Use "
+                    "only source_uri values that are present in the context pack source_refs."
+                ),
+            ),
+            ModelMessage(
+                role="user",
+                content=(
+                    "The previous model output passed schema validation but failed evidence "
+                    "verification. Regenerate a grounded test. You may keep the same question "
+                    "only if it can cite valid evidence refs from the context pack.\n\n"
+                    f"Evidence verification:\n{json.dumps(evidence_result.to_dict(), indent=2, sort_keys=True)}\n\n"
+                    f"Previous payload:\n{json.dumps(invalid_payload, indent=2, sort_keys=True)}\n\n"
+                    f"Context pack:\n{json.dumps(context_pack, indent=2, sort_keys=True)}"
+                ),
+            ),
+        ],
+        metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION, "evidence_feedback": True},
     )
 
 
