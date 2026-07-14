@@ -25,6 +25,13 @@ class GeneratedTestRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def get(self, generated_test_id: UUID) -> GeneratedTestRead | None:
+        with self.db.session() as session:
+            generated_test = session.get(GeneratedTest, generated_test_id)
+            if generated_test is None:
+                return None
+            return GeneratedTestRead.model_validate(generated_test)
+
     def create_many(self, inputs: list[GeneratedTestInput]) -> list[GeneratedTestRead]:
         if not inputs:
             return []
