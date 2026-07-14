@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Out Of Hands Test</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f7f9;
+        --panel: #ffffff;
+        --panel-muted: #f0f3f7;
+        --text: #19202a;
+        --muted: #667085;
+        --line: #d9dee7;
+        --accent: #176b87;
+        --accent-strong: #0f4f64;
+        --ok: #13795b;
+        --warn: #a15c08;
+        --bad: #b42318;
+        --shadow: 0 8px 24px rgba(16, 24, 40, 0.08);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 24px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin: 0;
+      }
+
+      h1 {
+        font-size: 18px;
+        font-weight: 700;
+      }
+
+      h2 {
+        font-size: 15px;
+        font-weight: 700;
+      }
+
+      h3 {
+        font-size: 14px;
+        font-weight: 700;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        gap: 16px;
+        padding: 16px;
+      }
+
+      aside,
+      section {
+        min-width: 0;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: var(--shadow);
+      }
+
+      .panel-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 14px;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .panel-body {
+        padding: 14px;
+      }
+
+      .grid {
+        display: grid;
+        gap: 10px;
+      }
+
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .row.wrap {
+        flex-wrap: wrap;
+      }
+
+      label {
+        display: grid;
+        gap: 5px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        font: inherit;
+        outline: none;
+      }
+
+      input,
+      select {
+        height: 36px;
+        padding: 0 10px;
+      }
+
+      textarea {
+        min-height: 92px;
+        resize: vertical;
+        padding: 10px;
+      }
+
+      input:focus,
+      select:focus,
+      textarea:focus {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.14);
+      }
+
+      button {
+        height: 34px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: #fff;
+        color: var(--text);
+        font: inherit;
+        font-weight: 700;
+        cursor: pointer;
+        padding: 0 10px;
+      }
+
+      button.primary {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+
+      button.primary:hover {
+        background: var(--accent-strong);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .repo-list,
+      .test-list,
+      .result-list,
+      .event-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .item {
+        display: grid;
+        gap: 6px;
+        padding: 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #fff;
+        text-align: left;
+      }
+
+      button.item {
+        height: auto;
+        font-weight: 500;
+      }
+
+      .item.active {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(23, 107, 135, 0.12);
+      }
+
+      .meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        padding: 2px 8px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--panel-muted);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .pill.ok {
+        border-color: rgba(19, 121, 91, 0.3);
+        background: rgba(19, 121, 91, 0.08);
+        color: var(--ok);
+      }
+
+      .pill.warn {
+        border-color: rgba(161, 92, 8, 0.3);
+        background: rgba(161, 92, 8, 0.08);
+        color: var(--warn);
+      }
+
+      .pill.bad {
+        border-color: rgba(180, 35, 24, 0.3);
+        background: rgba(180, 35, 24, 0.08);
+        color: var(--bad);
+      }
+
+      .details-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .metric {
+        display: grid;
+        gap: 3px;
+        padding: 10px;
+        border-radius: 8px;
+        background: var(--panel-muted);
+      }
+
+      .metric strong {
+        font-size: 16px;
+      }
+
+      pre {
+        max-height: 280px;
+        overflow: auto;
+        margin: 0;
+        padding: 10px;
+        border-radius: 8px;
+        background: #111827;
+        color: #e5e7eb;
+        font-size: 12px;
+        white-space: pre-wrap;
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+        gap: 16px;
+      }
+
+      .empty {
+        color: var(--muted);
+        padding: 10px;
+        border: 1px dashed var(--line);
+        border-radius: 8px;
+        background: #fff;
+      }
+
+      @media (max-width: 920px) {
+        main,
+        .split,
+        .details-grid {
+          grid-template-columns: 1fr;
+        }
+
+        header {
+          align-items: flex-start;
+          flex-direction: column;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="stack">
+        <h1>Out Of Hands Test</h1>
+        <p class="meta">Local repository understanding loop</p>
+      </div>
+      <div class="row wrap">
+        <span class="pill" id="runtime-pill">runtime</span>
+        <button id="refresh-button" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <main>
+      <aside class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Add Repository</h2>
+          </div>
+          <form class="panel-body grid" id="register-form">
+            <label>
+              Source type
+              <select id="source-type">
+                <option value="local_path">Local path</option>
+                <option value="github">GitHub URL</option>
+              </select>
+            </label>
+            <label>
+              Source URI
+              <input id="source-uri" value="/workspace" autocomplete="off" />
+            </label>
+            <label>
+              Name
+              <input id="repo-name" placeholder="Optional" autocomplete="off" />
+            </label>
+            <button class="primary" type="submit">Register</button>
+          </form>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Repositories</h2>
+            <button id="load-repos-button" type="button">Load</button>
+          </div>
+          <div class="panel-body">
+            <div class="repo-list" id="repo-list"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Events</h2>
+          </div>
+          <div class="panel-body">
+            <div class="event-list" id="event-list"></div>
+          </div>
+        </div>
+      </aside>
+
+      <section class="stack">
+        <div class="panel">
+          <div class="panel-header">
+            <h2>Repository Run</h2>
+            <span class="pill" id="selected-repo-pill">No repository selected</span>
+          </div>
+          <div class="panel-body stack">
+            <div class="details-grid">
+              <div class="metric">
+                <span class="meta">Status</span>
+                <strong id="repo-status">-</strong>
+              </div>
+              <div class="metric">
+                <span class="meta">Last commit</span>
+                <strong id="repo-commit">-</strong>
+              </div>
+              <div class="metric">
+                <span class="meta">Generated tests</span>
+                <strong id="test-count">0</strong>
+              </div>
+            </div>
+
+            <div class="row wrap">
+              <button id="ingest-button" type="button" disabled>Ingest</button>
+              <button id="context-button" type="button" disabled>Build Context</button>
+              <select id="pack-type" aria-label="Pack type">
+                <option value="low_level_components">low_level_components</option>
+                <option value="high_level_design">high_level_design</option>
+                <option value="design_decisions">design_decisions</option>
+                <option value="future_improvements">future_improvements</option>
+                <option value="active_pr">active_pr</option>
+              </select>
+              <button class="primary" id="generate-button" type="button" disabled>Generate Test</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Generated Tests</h2>
+              <button id="load-tests-button" type="button" disabled>Load</button>
+            </div>
+            <div class="panel-body">
+              <div class="test-list" id="test-list"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Selected Test</h2>
+              <span class="pill" id="selected-test-pill">None</span>
+            </div>
+            <div class="panel-body stack">
+              <div id="test-detail" class="empty">Select a generated test.</div>
+              <form class="grid" id="answer-form">
+                <label>
+                  Answer
+                  <textarea id="answer-text" placeholder="Write your answer here"></textarea>
+                </label>
+                <button class="primary" id="submit-answer-button" type="submit" disabled>
+                  Submit Answer
+                </button>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="split">
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Results</h2>
+              <button id="load-results-button" type="button" disabled>Load</button>
+            </div>
+            <div class="panel-body">
+              <div class="result-list" id="result-list"></div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-header">
+              <h2>Raw Payload</h2>
+            </div>
+            <div class="panel-body">
+              <pre id="raw-payload">{}</pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        repositories: [],
+        selectedRepo: null,
+        generatedTests: [],
+        selectedTest: null,
+        jobs: new Map(),
+      };
+
+      const $ = (id) => document.getElementById(id);
+
+      function logEvent(message, tone = "") {
+        const item = document.createElement("div");
+        item.className = "item";
+        item.innerHTML = `<span>${escapeHtml(message)}</span><span class="meta">${new Date().toLocaleTimeString()}</span>`;
+        $("event-list").prepend(item);
+        const events = [...$("event-list").children];
+        events.slice(8).forEach((event) => event.remove());
+      }
+
+      async function api(path, options = {}) {
+        const response = await fetch(path, {
+          headers: { "content-type": "application/json", ...(options.headers || {}) },
+          ...options,
+        });
+        const text = await response.text();
+        const payload = text ? JSON.parse(text) : null;
+        if (!response.ok) {
+          const detail = payload && payload.detail ? payload.detail : response.statusText;
+          throw new Error(Array.isArray(detail) ? detail.map((item) => item.msg).join(", ") : detail);
+        }
+        return payload;
+      }
+
+      async function loadRuntime() {
+        try {
+          const runtime = await api("/runtime");
+          $("runtime-pill").textContent = `${runtime.model_provider} · ${runtime.test_generator_model}`;
+        } catch (error) {
+          $("runtime-pill").textContent = "runtime unavailable";
+        }
+      }
+
+      async function loadRepositories() {
+        const repositories = await api("/repositories");
+        state.repositories = repositories;
+        renderRepositories();
+        if (!state.selectedRepo && repositories.length > 0) {
+          selectRepository(repositories[0].id);
+        } else if (state.selectedRepo) {
+          const refreshed = repositories.find((repo) => repo.id === state.selectedRepo.id);
+          if (refreshed) {
+            state.selectedRepo = refreshed;
+            renderSelectedRepository();
+          }
+        }
+      }
+
+      function renderRepositories() {
+        const list = $("repo-list");
+        list.innerHTML = "";
+        if (state.repositories.length === 0) {
+          list.innerHTML = `<div class="empty">No repositories yet.</div>`;
+          return;
+        }
+
+        for (const repo of state.repositories) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `item ${state.selectedRepo && state.selectedRepo.id === repo.id ? "active" : ""}`;
+          button.innerHTML = `
+            <strong>${escapeHtml(repo.name)}</strong>
+            <span class="meta">${escapeHtml(repo.source_uri)}</span>
+            <span>${statusPill(repo.status)}</span>
+          `;
+          button.addEventListener("click", () => selectRepository(repo.id));
+          list.appendChild(button);
+        }
+      }
+
+      async function selectRepository(repositoryId) {
+        state.selectedRepo = state.repositories.find((repo) => repo.id === repositoryId) || null;
+        state.generatedTests = [];
+        state.selectedTest = null;
+        renderRepositories();
+        renderSelectedRepository();
+        await loadGeneratedTests();
+      }
+
+      function renderSelectedRepository() {
+        const repo = state.selectedRepo;
+        const hasRepo = Boolean(repo);
+        $("selected-repo-pill").textContent = hasRepo ? repo.name : "No repository selected";
+        $("repo-status").textContent = hasRepo ? repo.status : "-";
+        $("repo-commit").textContent = hasRepo ? shortSha(repo.last_processed_commit_sha) : "-";
+        $("ingest-button").disabled = !hasRepo;
+        $("context-button").disabled = !hasRepo;
+        $("generate-button").disabled = !hasRepo;
+        $("load-tests-button").disabled = !hasRepo;
+        $("test-count").textContent = String(state.generatedTests.length);
+      }
+
+      async function registerRepository(event) {
+        event.preventDefault();
+        const body = {
+          source_type: $("source-type").value,
+          source_uri: $("source-uri").value.trim(),
+        };
+        if ($("repo-name").value.trim()) {
+          body.name = $("repo-name").value.trim();
+        }
+
+        const result = await api("/repositories", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        logEvent(`Registered ${result.repository.name}`);
+        await loadRepositories();
+        await selectRepository(result.repository.id);
+        pollJob(result.ingest_job.id, "ingest");
+      }
+
+      async function enqueueIngest() {
+        const repo = requireRepo();
+        const job = await api(`/repositories/${repo.id}/ingest-jobs`, { method: "POST" });
+        logEvent(`Queued ingest job ${shortId(job.id)}`);
+        pollJob(job.id, "ingest");
+      }
+
+      async function buildContextPacks() {
+        const repo = requireRepo();
+        const packs = await api(`/repositories/${repo.id}/context-packs`, { method: "POST" });
+        logEvent(`Built ${packs.length} context packs`);
+      }
+
+      async function enqueueGenerateTest() {
+        const repo = requireRepo();
+        const packType = $("pack-type").value;
+        const job = await api(`/repositories/${repo.id}/generate-test-jobs`, {
+          method: "POST",
+          body: JSON.stringify({ pack_types: [packType] }),
+        });
+        logEvent(`Queued generation job ${shortId(job.id)}`);
+        pollJob(job.id, "generate");
+      }
+
+      async function loadGeneratedTests() {
+        if (!state.selectedRepo) {
+          renderGeneratedTests();
+          return;
+        }
+        state.generatedTests = await api(`/repositories/${state.selectedRepo.id}/generated-tests`);
+        $("test-count").textContent = String(state.generatedTests.length);
+        renderGeneratedTests();
+        if (!state.selectedTest && state.generatedTests.length > 0) {
+          selectTest(state.generatedTests[0].id);
+        }
+      }
+
+      function renderGeneratedTests() {
+        const list = $("test-list");
+        list.innerHTML = "";
+        if (state.generatedTests.length === 0) {
+          list.innerHTML = `<div class="empty">No generated tests yet.</div>`;
+          renderSelectedTest();
+          return;
+        }
+
+        for (const test of state.generatedTests) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `item ${state.selectedTest && state.selectedTest.id === test.id ? "active" : ""}`;
+          button.innerHTML = `
+            <strong>${escapeHtml(test.test_payload.question || "Untitled test")}</strong>
+            <span class="meta">${escapeHtml(test.category)} · ${escapeHtml(test.test_payload.type)}</span>
+            <span class="meta">${test.evidence_refs.length} evidence ref(s)</span>
+          `;
+          button.addEventListener("click", () => selectTest(test.id));
+          list.appendChild(button);
+        }
+      }
+
+      function selectTest(testId) {
+        state.selectedTest = state.generatedTests.find((test) => test.id === testId) || null;
+        renderGeneratedTests();
+        renderSelectedTest();
+        loadResults();
+      }
+
+      function renderSelectedTest() {
+        const test = state.selectedTest;
+        $("submit-answer-button").disabled = !test;
+        $("load-results-button").disabled = !test;
+        $("selected-test-pill").textContent = test ? shortId(test.id) : "None";
+
+        if (!test) {
+          $("test-detail").className = "empty";
+          $("test-detail").textContent = "Select a generated test.";
+          $("raw-payload").textContent = "{}";
+          return;
+        }
+
+        const payload = test.test_payload;
+        const options = Array.isArray(payload.options)
+          ? `<div class="grid">${payload.options
+              .map(
+                (option) =>
+                  `<label class="row"><input type="${payload.type === "mcq_multi" ? "checkbox" : "radio"}" name="option" value="${escapeAttr(
+                    option.id
+                  )}" /> ${escapeHtml(option.id)}. ${escapeHtml(option.text)}</label>`
+              )
+              .join("")}</div>`
+          : "";
+
+        $("test-detail").className = "stack";
+        $("test-detail").innerHTML = `
+          <h3>${escapeHtml(payload.question || "Untitled test")}</h3>
+          <div class="row wrap">
+            <span class="pill">${escapeHtml(payload.type)}</span>
+            <span class="pill">${escapeHtml(test.category)}</span>
+          </div>
+          ${options}
+          ${
+            payload.expected_answer
+              ? `<details><summary class="meta">Expected answer</summary><pre>${escapeHtml(payload.expected_answer)}</pre></details>`
+              : ""
+          }
+        `;
+        $("raw-payload").textContent = JSON.stringify(test, null, 2);
+      }
+
+      async function submitAnswer(event) {
+        event.preventDefault();
+        const test = requireTest();
+        const selectedOptionIds = [...document.querySelectorAll('input[name="option"]:checked')].map(
+          (input) => input.value
+        );
+        const body = {
+          answer_text: $("answer-text").value.trim() || undefined,
+          selected_option_ids: selectedOptionIds,
+        };
+        const result = await api(`/generated-tests/${test.id}/answers`, {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        logEvent(`Submitted answer ${shortId(result.answer.id)}`);
+        pollJob(result.judge_job.id, "judge");
+      }
+
+      async function loadResults() {
+        if (!state.selectedTest) {
+          $("result-list").innerHTML = `<div class="empty">No test selected.</div>`;
+          return;
+        }
+        const results = await api(`/generated-tests/${state.selectedTest.id}/results`);
+        const list = $("result-list");
+        list.innerHTML = "";
+        if (results.length === 0) {
+          list.innerHTML = `<div class="empty">No results yet.</div>`;
+          return;
+        }
+
+        for (const result of results) {
+          const item = document.createElement("div");
+          item.className = "item";
+          item.innerHTML = `
+            <div class="row wrap">
+              ${statusPill(result.status)}
+              <span class="pill">score ${Number(result.score).toFixed(2)}</span>
+              ${result.alert_flag ? '<span class="pill bad">alert</span>' : ""}
+            </div>
+            <p>${escapeHtml(result.feedback.feedback || "")}</p>
+            <span class="meta">${new Date(result.created_at).toLocaleString()}</span>
+          `;
+          list.appendChild(item);
+        }
+      }
+
+      async function pollJob(jobId, kind) {
+        state.jobs.set(jobId, kind);
+        for (;;) {
+          const job = await api(`/jobs/${jobId}`);
+          logEvent(`${kind} job ${shortId(jobId)} is ${job.status}`);
+          if (job.status === "succeeded") {
+            await loadRepositories();
+            if (kind === "generate") {
+              await loadGeneratedTests();
+            }
+            if (kind === "judge") {
+              await loadResults();
+            }
+            return job;
+          }
+          if (job.status === "failed" || job.status === "cancelled") {
+            throw new Error(job.error_summary || `${kind} job ${job.status}`);
+          }
+          await sleep(1800);
+        }
+      }
+
+      function requireRepo() {
+        if (!state.selectedRepo) {
+          throw new Error("Select a repository first.");
+        }
+        return state.selectedRepo;
+      }
+
+      function requireTest() {
+        if (!state.selectedTest) {
+          throw new Error("Select a generated test first.");
+        }
+        return state.selectedTest;
+      }
+
+      function statusPill(status) {
+        const tone =
+          status === "succeeded" || status === "indexed" || status === "passing"
+            ? "ok"
+            : status === "failed" || status === "getting_out_of_hand"
+              ? "bad"
+              : status === "needs_review" || status === "retry_wait"
+                ? "warn"
+                : "";
+        return `<span class="pill ${tone}">${escapeHtml(status || "-")}</span>`;
+      }
+
+      function shortSha(value) {
+        return value ? value.slice(0, 8) : "-";
+      }
+
+      function shortId(value) {
+        return value ? value.slice(0, 8) : "-";
+      }
+
+      function sleep(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
+      }
+
+      function escapeHtml(value) {
+        return String(value ?? "")
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#039;");
+      }
+
+      function escapeAttr(value) {
+        return escapeHtml(value).replaceAll("`", "&#096;");
+      }
+
+      async function guarded(action) {
+        try {
+          await action();
+        } catch (error) {
+          logEvent(error.message || String(error));
+        }
+      }
+
+      $("register-form").addEventListener("submit", (event) => guarded(() => registerRepository(event)));
+      $("load-repos-button").addEventListener("click", () => guarded(loadRepositories));
+      $("refresh-button").addEventListener("click", () => guarded(loadRepositories));
+      $("ingest-button").addEventListener("click", () => guarded(enqueueIngest));
+      $("context-button").addEventListener("click", () => guarded(buildContextPacks));
+      $("generate-button").addEventListener("click", () => guarded(enqueueGenerateTest));
+      $("load-tests-button").addEventListener("click", () => guarded(loadGeneratedTests));
+      $("answer-form").addEventListener("submit", (event) => guarded(() => submitAnswer(event)));
+      $("load-results-button").addEventListener("click", () => guarded(loadResults));
+
+      guarded(async () => {
+        await loadRuntime();
+        await loadRepositories();
+      });
+    </script>
+  </body>
+</html>

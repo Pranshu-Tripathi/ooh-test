@@ -29,6 +29,9 @@ curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 ```
 
+Open the small dashboard at http://localhost:8080/ to register a repository, watch jobs,
+generate a test, submit an answer, and inspect results.
+
 Register a local repository:
 
 ```bash

@@ -1,7 +1,9 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 import uvicorn
 
 from ooh import __version__
@@ -13,6 +15,7 @@ from ooh.db import check_database, check_schema_current
 from ooh.logging import configure_logging
 
 settings = get_settings()
+UI_INDEX_PATH = Path(__file__).resolve().parent / "static" / "index.html"
 
 
 @asynccontextmanager
@@ -26,6 +29,11 @@ app = FastAPI(title="Out Of Hands Test API", version=__version__, lifespan=lifes
 app.include_router(jobs_router)
 app.include_router(repositories_router)
 app.include_router(tests_router)
+
+
+@app.get("/", include_in_schema=False)
+def ui() -> FileResponse:
+    return FileResponse(UI_INDEX_PATH)
 
 
 @app.get("/healthz")
