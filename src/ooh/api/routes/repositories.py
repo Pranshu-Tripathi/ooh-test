@@ -7,6 +7,8 @@ from ooh.api.schemas.repositories import (
     AttentionProfileResponse,
     ContextPackResponse,
     DriftEventResponse,
+    GeneratedTestResponse,
+    GenerateTestJobRequest,
     JobResponse,
     RepositoryCreateRequest,
     RepositoryRegistrationResponse,
@@ -21,6 +23,7 @@ from ooh.db.repos import (
     AttentionProfileRepo,
     ContextPackRepo,
     DriftEventRepo,
+    GeneratedTestRepo,
     GuidanceSourceRepo,
     JobRepo,
     RepoSnapshotRepo,
@@ -36,6 +39,7 @@ repo_snapshot_repo = RepoSnapshotRepo(get_database())
 guidance_source_repo = GuidanceSourceRepo(get_database())
 job_repo = JobRepo(get_database())
 drift_event_repo = DriftEventRepo(get_database())
+generated_test_repo = GeneratedTestRepo(get_database())
 context_pack_builder = ContextPackBuilder(cache_root=get_settings().cache_root)
 
 
@@ -85,6 +89,39 @@ def enqueue_repository_ingest(repository_id: UUID) -> JobResponse:
         },
     )
     return JobResponse.from_record(ingest_job)
+
+
+@router.post(
+    "/{repository_id}/generate-test-jobs",
+    response_model=JobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def enqueue_generate_test_job(
+    repository_id: UUID,
+    request: GenerateTestJobRequest | None = None,
+) -> JobResponse:
+    request = request or GenerateTestJobRequest()
+    repository = repository_repo.get(repository_id)
+    if repository is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
+
+    snapshot = repo_snapshot_repo.latest_for_repository(repository_id)
+    if snapshot is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="repository has no snapshots")
+
+    payload = {
+        "repository_id": str(repository_id),
+        "snapshot_id": str(snapshot.id),
+    }
+    if request.pack_types is not None:
+        payload["pack_types"] = [pack_type.value for pack_type in request.pack_types]
+
+    generate_job = job_repo.enqueue(
+        repository_id=repository_id,
+        job_type=JobType.GENERATE_TEST,
+        payload=payload,
+    )
+    return JobResponse.from_record(generate_job)
 
 
 @router.post(
@@ -189,6 +226,16 @@ def list_context_packs(repository_id: UUID) -> list[ContextPackResponse]:
 
     context_packs = context_pack_repo.list_for_repository(repository_id)
     return [ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in context_packs]
+
+
+@router.get("/{repository_id}/generated-tests", response_model=list[GeneratedTestResponse])
+def list_generated_tests(repository_id: UUID) -> list[GeneratedTestResponse]:
+    repository = repository_repo.get(repository_id)
+    if repository is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
+
+    generated_tests = generated_test_repo.list_for_repository(repository_id)
+    return [GeneratedTestResponse.from_record(generated_test) for generated_test in generated_tests]
 
 
 @router.get("/{repository_id}/drift-events", response_model=list[DriftEventResponse])

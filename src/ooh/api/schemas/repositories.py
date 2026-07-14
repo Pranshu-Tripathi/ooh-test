@@ -15,6 +15,7 @@ from ooh.db.models import (
     ContextPackType,
     DriftEventRead,
     DriftSeverity,
+    GeneratedTestRead,
     JobRead,
     JobStatus,
     JobType,
@@ -89,6 +90,40 @@ class JobResponse(BaseModel):
 class RepositoryRegistrationResponse(BaseModel):
     repository: RepositoryResponse
     ingest_job: JobResponse
+
+
+class GenerateTestJobRequest(BaseModel):
+    pack_types: list[ContextPackType] | None = Field(default=None, min_length=1, max_length=5)
+
+
+class GeneratedTestResponse(BaseModel):
+    id: UUID
+    repository_id: UUID
+    snapshot_id: UUID
+    drift_event_id: UUID | None
+    agent_run_id: UUID | None
+    context_pack_id: UUID | None
+    category: str
+    test_payload: dict[str, Any]
+    evidence_refs: list[dict[str, Any]]
+    prompt_version: str | None
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, generated_test: GeneratedTestRead) -> "GeneratedTestResponse":
+        return cls(
+            id=generated_test.id,
+            repository_id=generated_test.repository_id,
+            snapshot_id=generated_test.snapshot_id,
+            drift_event_id=generated_test.drift_event_id,
+            agent_run_id=generated_test.agent_run_id,
+            context_pack_id=generated_test.context_pack_id,
+            category=generated_test.category.value,
+            test_payload=generated_test.test_payload,
+            evidence_refs=generated_test.evidence_refs,
+            prompt_version=generated_test.prompt_version,
+            created_at=generated_test.created_at,
+        )
 
 
 class DriftEventResponse(BaseModel):

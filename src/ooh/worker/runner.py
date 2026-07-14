@@ -1,18 +1,25 @@
 import logging
 from uuid import UUID
 
+from ooh.agent.artifacts import AgentArtifactStore
+from ooh.agent.providers import build_model_provider
+from ooh.agent.test_generation_runner import GeneratedTestRunService
 from ooh.config import get_settings
 from ooh.db import Database
-from ooh.db.models import JobRead, JobStatus, JobType
+from ooh.db.models import ContextPackType, JobRead, JobStatus, JobType
 from ooh.db.repos import (
+    AgentTraceRepo,
     AttentionProfileRepo,
     AttentionProfileWithFocusAreas,
+    ContextPackRepo,
     DriftEventRepo,
+    GeneratedTestRepo,
     GuidanceSourceRepo,
     JobRepo,
     RepoSnapshotRepo,
     RepositoryRepo,
 )
+from ooh.worker.context_pack_builder import ContextPackBuilder
 from ooh.worker.drift_scorer import AttentionFocusWeight, AttentionProfileWeights, GitDriftScorer
 from ooh.worker.repository_inspector import LocalRepositoryInspector
 from ooh.worker.repository_source_resolver import RepositorySourceResolver
@@ -30,9 +37,20 @@ class JobRunner:
         self.repo_snapshot_repo = RepoSnapshotRepo(db)
         self.drift_event_repo = DriftEventRepo(db)
         self.guidance_source_repo = GuidanceSourceRepo(db)
+        self.context_pack_repo = ContextPackRepo(db)
+        self.agent_trace_repo = AgentTraceRepo(db)
+        self.generated_test_repo = GeneratedTestRepo(db)
         self.repository_source_resolver = RepositorySourceResolver(cache_root=settings.cache_root)
         self.repository_inspector = LocalRepositoryInspector(cache_root=settings.cache_root)
+        self.context_pack_builder = ContextPackBuilder(cache_root=settings.cache_root)
         self.drift_scorer = GitDriftScorer()
+        self.generated_test_run_service = GeneratedTestRunService(
+            provider=build_model_provider(settings),
+            model=settings.test_generator_model,
+            artifact_store=AgentArtifactStore(cache_root=settings.cache_root),
+            agent_trace_repo=self.agent_trace_repo,
+            generated_test_repo=self.generated_test_repo,
+        )
 
     def process_once(self) -> bool:
         job = self.job_repo.claim_next(worker_id=self.worker_id)
@@ -64,6 +82,9 @@ class JobRunner:
     def dispatch(self, job: JobRead) -> None:
         if job.job_type == JobType.INGEST_REPOSITORY:
             self.ingest_repository(job)
+            return
+        if job.job_type == JobType.GENERATE_TEST:
+            self.generate_tests(job)
             return
 
         raise ValueError(f"unsupported job type: {job.job_type.value}")
@@ -120,6 +141,83 @@ class JobRunner:
                 "drift_recorded": drift_summary.should_record,
             },
         )
+
+    def generate_tests(self, job: JobRead) -> None:
+        if job.repository_id is None:
+            raise ValueError("generate_test job requires repository_id")
+
+        repository = self.repository_repo.get(job.repository_id)
+        if repository is None:
+            raise ValueError(f"repository not found: {job.repository_id}")
+
+        snapshot = self.repo_snapshot_repo.latest_for_repository(job.repository_id)
+        if snapshot is None:
+            raise ValueError(f"repository has no snapshots: {job.repository_id}")
+
+        active_profile = self.attention_profile_repo.get_active_for_repository(job.repository_id)
+        drift_event = self.drift_event_repo.latest_for_repository(job.repository_id)
+        guidance_sources = self.guidance_source_repo.list_enabled_for_repository(job.repository_id)
+        requested_pack_types = self._requested_pack_types(job)
+        built_packs = self.context_pack_builder.build(
+            repository=repository,
+            snapshot=snapshot,
+            drift_event=drift_event,
+            guidance_sources=guidance_sources,
+            attention_profile=active_profile.profile if active_profile is not None else None,
+            attention_focus_areas=active_profile.focus_areas if active_profile is not None else [],
+        )
+        created_packs = [
+            self.context_pack_repo.create(
+                repository_id=job.repository_id,
+                snapshot_id=snapshot.id,
+                attention_profile_id=active_profile.profile.id if active_profile is not None else None,
+                pack_type=built_pack.pack_type,
+                artifact_uri=built_pack.artifact_uri,
+                content_hash=built_pack.content_hash,
+                sources=built_pack.sources,
+            )
+            for built_pack in built_packs
+        ]
+        selected_packs = [
+            context_pack
+            for context_pack in created_packs
+            if requested_pack_types is None
+            or context_pack.context_pack.pack_type in requested_pack_types
+        ]
+        if not selected_packs:
+            raise ValueError("generate_test job did not select any context packs")
+
+        run_result = self.generated_test_run_service.generate_for_context_packs(
+            selected_packs,
+            job_id=job.id,
+        )
+        logger.info(
+            "generated tests",
+            extra={
+                "repository_id": str(job.repository_id),
+                "job_id": str(job.id),
+                "agent_run_id": str(run_result.agent_run.id),
+                "generated_test_count": len(run_result.generated_tests),
+                "context_pack_ids": [
+                    str(context_pack.context_pack.id) for context_pack in selected_packs
+                ],
+            },
+        )
+
+    @staticmethod
+    def _requested_pack_types(job: JobRead) -> set[ContextPackType] | None:
+        raw_pack_types = job.payload.get("pack_types")
+        if raw_pack_types is None:
+            return None
+        if not isinstance(raw_pack_types, list):
+            raise ValueError("generate_test payload pack_types must be a list")
+
+        pack_types: set[ContextPackType] = set()
+        for raw_pack_type in raw_pack_types:
+            if not isinstance(raw_pack_type, str):
+                raise ValueError("generate_test payload pack_types must contain strings")
+            pack_types.add(ContextPackType(raw_pack_type))
+        return pack_types or None
 
     def _active_attention_profile_weights(self, repository_id: UUID) -> AttentionProfileWeights | None:
         active_profile = self.attention_profile_repo.get_active_for_repository(repository_id)
