@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,61 @@ from ooh.db.models import (
 )
 from ooh.db.repos import ContextPackSourceInput
 
+DEFAULT_MAX_PACK_CONTENT_BYTES = 60_000
+DEFAULT_MAX_CODE_EXCERPT_BYTES = 12_000
+DEFAULT_MAX_GUIDANCE_EXCERPT_BYTES = 8_000
+
+UNSAFE_PROMPT_PATH_NAMES = {
+    ".env",
+    ".env.local",
+    ".envrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials",
+    "credentials.json",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "id_rsa",
+}
+
+UNSAFE_PROMPT_EXTENSIONS = {
+    ".crt",
+    ".der",
+    ".key",
+    ".pem",
+    ".pfx",
+    ".p12",
+}
+
+BINARY_PROMPT_EXTENSIONS = {
+    ".7z",
+    ".avif",
+    ".bin",
+    ".bmp",
+    ".class",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".gif",
+    ".ico",
+    ".jar",
+    ".jpeg",
+    ".jpg",
+    ".lockb",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".so",
+    ".webp",
+    ".zip",
+}
+
+SECRET_LINE_PATTERN = re.compile(
+    r"(?i)\b(api[_-]?key|auth[_-]?token|client[_-]?secret|password|private[_-]?key|secret|token)\b"
+    r"\s*[:=]"
+)
+
 
 @dataclass(frozen=True)
 class BuiltContextPack:
@@ -28,9 +84,38 @@ class BuiltContextPack:
     sources: list[ContextPackSourceInput]
 
 
+@dataclass
+class PromptContentBudget:
+    max_bytes: int
+    used_bytes: int = 0
+    included_excerpt_count: int = 0
+    omitted_excerpt_count: int = 0
+
+    @property
+    def remaining_bytes(self) -> int:
+        return max(self.max_bytes - self.used_bytes, 0)
+
+    def consume(self, text: str) -> None:
+        self.used_bytes += len(text.encode("utf-8"))
+        self.included_excerpt_count += 1
+
+    def omit(self) -> None:
+        self.omitted_excerpt_count += 1
+
+
 class ContextPackBuilder:
-    def __init__(self, *, cache_root: Path) -> None:
+    def __init__(
+        self,
+        *,
+        cache_root: Path,
+        max_pack_content_bytes: int = DEFAULT_MAX_PACK_CONTENT_BYTES,
+        max_code_excerpt_bytes: int = DEFAULT_MAX_CODE_EXCERPT_BYTES,
+        max_guidance_excerpt_bytes: int = DEFAULT_MAX_GUIDANCE_EXCERPT_BYTES,
+    ) -> None:
         self.cache_root = cache_root
+        self.max_pack_content_bytes = max_pack_content_bytes
+        self.max_code_excerpt_bytes = max_code_excerpt_bytes
+        self.max_guidance_excerpt_bytes = max_guidance_excerpt_bytes
 
     def build(
         self,
@@ -49,6 +134,7 @@ class ContextPackBuilder:
         packs = [
             self._pack_payload(
                 pack_type=ContextPackType.HIGH_LEVEL_DESIGN,
+                snapshot_payload=snapshot_payload,
                 repository=repository,
                 snapshot=snapshot,
                 drift_event=drift_event,
@@ -66,6 +152,7 @@ class ContextPackBuilder:
             ),
             self._pack_payload(
                 pack_type=ContextPackType.LOW_LEVEL_COMPONENTS,
+                snapshot_payload=snapshot_payload,
                 repository=repository,
                 snapshot=snapshot,
                 drift_event=drift_event,
@@ -79,6 +166,7 @@ class ContextPackBuilder:
             ),
             self._pack_payload(
                 pack_type=ContextPackType.DESIGN_DECISIONS,
+                snapshot_payload=snapshot_payload,
                 repository=repository,
                 snapshot=snapshot,
                 drift_event=drift_event,
@@ -96,6 +184,7 @@ class ContextPackBuilder:
             ),
             self._pack_payload(
                 pack_type=ContextPackType.FUTURE_IMPROVEMENTS,
+                snapshot_payload=snapshot_payload,
                 repository=repository,
                 snapshot=snapshot,
                 drift_event=drift_event,
@@ -109,6 +198,7 @@ class ContextPackBuilder:
             ),
             self._pack_payload(
                 pack_type=ContextPackType.ACTIVE_PR,
+                snapshot_payload=snapshot_payload,
                 repository=repository,
                 snapshot=snapshot,
                 drift_event=drift_event,
@@ -128,6 +218,7 @@ class ContextPackBuilder:
         self,
         *,
         pack_type: ContextPackType,
+        snapshot_payload: dict[str, Any],
         repository: RepositoryRead,
         snapshot: RepoSnapshotRead,
         drift_event: DriftEventRead | None,
@@ -139,6 +230,17 @@ class ContextPackBuilder:
         included_guidance: list[GuidanceSourceRead],
         purpose: str,
     ) -> dict[str, Any]:
+        content_budget = PromptContentBudget(self.max_pack_content_bytes)
+        included_files = self._with_file_content(
+            snapshot_payload=snapshot_payload,
+            files=files[:100],
+            content_budget=content_budget,
+        )
+        included_guidance_payload = self._with_guidance_content(
+            snapshot_payload=snapshot_payload,
+            guidance_sources=included_guidance[:25],
+            content_budget=content_budget,
+        )
         payload = {
             "schema_version": 1,
             "pack_type": pack_type.value,
@@ -156,15 +258,8 @@ class ContextPackBuilder:
             },
             "drift": self._drift_payload(drift_event),
             "attention_profile": self._attention_profile_payload(attention_profile, attention_focus_areas),
-            "included_files": files[:100],
-            "included_guidance": [
-                {
-                    "path": source.path,
-                    "source_type": source.source_type.value,
-                    "content_hash": source.content_hash,
-                }
-                for source in included_guidance[:25]
-            ],
+            "included_files": included_files,
+            "included_guidance": included_guidance_payload,
             "source_refs": self._source_refs(
                 files=files,
                 included_guidance=included_guidance,
@@ -177,8 +272,161 @@ class ContextPackBuilder:
                 "included_file_count": min(len(files), 100),
                 "included_guidance_count": min(len(included_guidance), 25),
             },
+            "prompt_content": {
+                "max_total_bytes": content_budget.max_bytes,
+                "used_bytes": content_budget.used_bytes,
+                "remaining_bytes": content_budget.remaining_bytes,
+                "included_excerpt_count": content_budget.included_excerpt_count,
+                "omitted_excerpt_count": content_budget.omitted_excerpt_count,
+                "max_code_excerpt_bytes": self.max_code_excerpt_bytes,
+                "max_guidance_excerpt_bytes": self.max_guidance_excerpt_bytes,
+            },
         }
         return payload
+
+    def _with_file_content(
+        self,
+        *,
+        snapshot_payload: dict[str, Any],
+        files: list[dict[str, Any]],
+        content_budget: PromptContentBudget,
+    ) -> list[dict[str, Any]]:
+        enriched_files: list[dict[str, Any]] = []
+        for file in files:
+            path = file.get("path")
+            if not isinstance(path, str):
+                enriched_files.append(file)
+                continue
+
+            enriched_files.append(
+                {
+                    **file,
+                    "content_excerpt": self._content_excerpt(
+                        snapshot_payload=snapshot_payload,
+                        relative_path=path,
+                        max_excerpt_bytes=self.max_code_excerpt_bytes,
+                        content_budget=content_budget,
+                    ),
+                }
+            )
+        return enriched_files
+
+    def _with_guidance_content(
+        self,
+        *,
+        snapshot_payload: dict[str, Any],
+        guidance_sources: list[GuidanceSourceRead],
+        content_budget: PromptContentBudget,
+    ) -> list[dict[str, Any]]:
+        guidance_payloads: list[dict[str, Any]] = []
+        for source in guidance_sources:
+            guidance_payloads.append(
+                {
+                    "path": source.path,
+                    "source_type": source.source_type.value,
+                    "content_hash": source.content_hash,
+                    "content_excerpt": self._content_excerpt(
+                        snapshot_payload=snapshot_payload,
+                        relative_path=source.path,
+                        max_excerpt_bytes=self.max_guidance_excerpt_bytes,
+                        content_budget=content_budget,
+                    ),
+                }
+            )
+        return guidance_payloads
+
+    def _content_excerpt(
+        self,
+        *,
+        snapshot_payload: dict[str, Any],
+        relative_path: str,
+        max_excerpt_bytes: int,
+        content_budget: PromptContentBudget,
+    ) -> dict[str, Any]:
+        if self._is_prompt_unsafe_path(relative_path):
+            content_budget.omit()
+            return {"omitted": True, "omitted_reason": "unsafe_path"}
+
+        if content_budget.remaining_bytes <= 0:
+            content_budget.omit()
+            return {"omitted": True, "omitted_reason": "prompt_budget_exhausted"}
+
+        repository_path = self._resolved_repository_path(snapshot_payload)
+        if repository_path is None:
+            content_budget.omit()
+            return {"omitted": True, "omitted_reason": "repository_path_unavailable"}
+
+        source_path = self._safe_repository_file(repository_path, relative_path)
+        if source_path is None or not source_path.is_file():
+            content_budget.omit()
+            return {"omitted": True, "omitted_reason": "file_unavailable"}
+
+        byte_limit = min(max_excerpt_bytes, content_budget.remaining_bytes)
+        if byte_limit <= 0:
+            content_budget.omit()
+            return {"omitted": True, "omitted_reason": "prompt_budget_exhausted"}
+
+        with source_path.open("rb") as source_file:
+            raw_excerpt = source_file.read(byte_limit + 1)
+        if b"\0" in raw_excerpt:
+            content_budget.omit()
+            return {"omitted": True, "omitted_reason": "binary_file"}
+
+        raw_excerpt = raw_excerpt[:byte_limit]
+        text = raw_excerpt.decode("utf-8", errors="replace")
+        text = self._redact_secret_lines(text)
+        truncated = source_path.stat().st_size > byte_limit
+        content_budget.consume(text)
+        return {
+            "omitted": False,
+            "text": text,
+            "start_line": 1,
+            "end_line": max(len(text.splitlines()), 1),
+            "truncated": truncated,
+            "size_bytes": source_path.stat().st_size,
+            "max_bytes": max_excerpt_bytes,
+        }
+
+    @staticmethod
+    def _resolved_repository_path(snapshot_payload: dict[str, Any]) -> Path | None:
+        resolved_path = snapshot_payload.get("resolved_path")
+        if not isinstance(resolved_path, str):
+            return None
+
+        repository_path = Path(resolved_path).expanduser().resolve()
+        if not repository_path.is_dir():
+            return None
+        return repository_path
+
+    @staticmethod
+    def _safe_repository_file(repository_path: Path, relative_path: str) -> Path | None:
+        source_path = (repository_path / relative_path).resolve()
+        if not source_path.is_relative_to(repository_path):
+            return None
+        return source_path
+
+    @staticmethod
+    def _is_prompt_unsafe_path(path: str) -> bool:
+        normalized_path = Path(path)
+        lower_parts = [part.lower() for part in normalized_path.parts]
+        lower_name = normalized_path.name.lower()
+        lower_suffix = normalized_path.suffix.lower()
+
+        if lower_name in UNSAFE_PROMPT_PATH_NAMES:
+            return True
+        if lower_suffix in UNSAFE_PROMPT_EXTENSIONS or lower_suffix in BINARY_PROMPT_EXTENSIONS:
+            return True
+        return any(part in {"secrets", ".secrets"} for part in lower_parts)
+
+    @staticmethod
+    def _redact_secret_lines(text: str) -> str:
+        redacted_lines = [
+            "[redacted credential-looking line]" if SECRET_LINE_PATTERN.search(line) else line
+            for line in text.splitlines()
+        ]
+        if text.endswith(("\n", "\r")):
+            return "\n".join(redacted_lines) + "\n"
+        return "\n".join(redacted_lines)
 
     def _write_pack(
         self,
