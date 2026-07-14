@@ -5,6 +5,7 @@ from fastapi import FastAPI
 import uvicorn
 
 from ooh import __version__
+from ooh.api.routes.jobs import router as jobs_router
 from ooh.api.routes.repositories import router as repositories_router
 from ooh.api.routes.tests import router as tests_router
 from ooh.config import get_settings
@@ -22,6 +23,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Out Of Hands Test API", version=__version__, lifespan=lifespan)
+app.include_router(jobs_router)
 app.include_router(repositories_router)
 app.include_router(tests_router)
 

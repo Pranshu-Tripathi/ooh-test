@@ -51,6 +51,12 @@ Enqueue another ingest after new commits land:
 curl -X POST http://localhost:8080/repositories/{repository_id}/ingest-jobs
 ```
 
+Poll any background job:
+
+```bash
+curl http://localhost:8080/jobs/{job_id}
+```
+
 List drift events for a repository:
 
 ```bash
@@ -67,6 +73,37 @@ List context packs:
 
 ```bash
 curl http://localhost:8080/repositories/{repository_id}/context-packs
+```
+
+Generate repository-specific tests from the latest snapshot. During smoke testing, request a
+single pack type so the local model does one focused generation first:
+
+```bash
+curl -X POST http://localhost:8080/repositories/{repository_id}/generate-test-jobs \
+  -H "content-type: application/json" \
+  -d '{"pack_types":["low_level_components"]}'
+```
+
+After the job succeeds, list generated tests:
+
+```bash
+curl http://localhost:8080/repositories/{repository_id}/generated-tests
+```
+
+Submit an answer and enqueue judging:
+
+```bash
+curl -X POST http://localhost:8080/generated-tests/{generated_test_id}/answers \
+  -H "content-type: application/json" \
+  -d '{"answer_text":"The component reads the repository snapshot and builds bounded context."}'
+```
+
+After the judge job succeeds, inspect the scored result and any saved learnings:
+
+```bash
+curl http://localhost:8080/generated-tests/{generated_test_id}/results
+curl http://localhost:8080/repositories/{repository_id}/test-results
+curl http://localhost:8080/repositories/{repository_id}/learnings
 ```
 
 Create an active attention profile to weight drift by path:
@@ -90,11 +127,14 @@ mounts the current project at `/workspace`; set
 repository. GitHub repositories are cloned or fast-forwarded under `OOH_CACHE_ROOT`, which
 Compose mounts to `.ooh_cache/` in this project.
 
-The worker currently creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
+The worker creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
 `docs/**`, and `adr/**`, records baseline and commit-to-commit drift events using the active
 attention profile if one exists, and marks the repository indexed at the resolved commit SHA.
-The API can then build deterministic context-pack artifacts for later test generation.
+Generation jobs build bounded context-pack artifacts with prompt-safe code and guidance excerpts,
+call the configured local model through Ollama, validate schema and evidence refs, and persist
+generated tests plus agent traces. Judging jobs score submitted answers, persist result history,
+and save model-suggested learnings when returned.
 
 Phase 1 is being implemented in reviewable components.
 

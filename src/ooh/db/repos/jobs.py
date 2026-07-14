@@ -12,6 +12,13 @@ class JobRepo:
     def __init__(self, db: Database) -> None:
         self.db = db
 
+    def get(self, job_id: UUID) -> JobRead | None:
+        with self.db.session() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                return None
+            return JobRead.model_validate(job)
+
     def enqueue(
         self,
         *,
