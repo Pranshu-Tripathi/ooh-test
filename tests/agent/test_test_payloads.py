@@ -25,6 +25,38 @@ def test_short_answer_payload_normalizes() -> None:
     assert payload["expected_answer"] == "Use the cited repository guidance."
 
 
+def test_mcq_single_shorthand_payload_normalizes() -> None:
+    payload = normalize_generated_test_payload(
+        {
+            "type": "mcq_single",
+            "question": "Which approach is used?",
+            "evidence_refs": ["guidance:README.md"],
+            "options": [
+                "vector search",
+                "LLM-based recommendation",
+                "rule-based filtering",
+                "keyword matching",
+            ],
+            "answer": "vector search",
+        }
+    )
+
+    assert payload["evidence_refs"] == [
+        {
+            "source_type": "guidance",
+            "source_uri": "guidance:README.md",
+            "metadata": {},
+        }
+    ]
+    assert payload["options"] == [
+        {"id": "A", "text": "vector search"},
+        {"id": "B", "text": "LLM-based recommendation"},
+        {"id": "C", "text": "rule-based filtering"},
+        {"id": "D", "text": "keyword matching"},
+    ]
+    assert payload["correct_option_ids"] == ["A"]
+
+
 def test_mcq_single_requires_correct_option_to_exist() -> None:
     with pytest.raises(ValidationError, match="correct option ids are not present"):
         validate_generated_test_payload(

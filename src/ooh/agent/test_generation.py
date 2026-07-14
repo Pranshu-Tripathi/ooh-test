@@ -185,7 +185,9 @@ def build_test_generation_request(*, model: str, context_pack: dict[str, Any]) -
                     "You generate repository-understanding tests for developers. "
                     "Return exactly one JSON object and no prose. The JSON must match one of "
                     "these types: short_answer, mcq_single, mcq_multi. Include evidence_refs "
-                    "using source_uri values present in the context pack when possible."
+                    "using source_uri values present in the context pack when possible. "
+                    "For MCQ options, use objects like {\"id\":\"A\",\"text\":\"...\"}; "
+                    "use correct_option_ids, not answer."
                 ),
             ),
             ModelMessage(
@@ -218,7 +220,9 @@ def build_test_generation_repair_request(
                 content=(
                     "You repair generated repository-understanding test JSON. "
                     "Return exactly one corrected JSON object and no prose. The JSON must match "
-                    "one of these types: short_answer, mcq_single, mcq_multi."
+                    "one of these types: short_answer, mcq_single, mcq_multi. "
+                    "For MCQ options, use objects like {\"id\":\"A\",\"text\":\"...\"}; "
+                    "use correct_option_ids, not answer."
                 ),
             ),
             ModelMessage(

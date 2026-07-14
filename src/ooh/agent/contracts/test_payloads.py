@@ -92,8 +92,105 @@ def validate_generated_test_payload(payload: dict[str, Any]) -> GeneratedTestPay
 
 
 def normalize_generated_test_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    validated_payload = validate_generated_test_payload(payload)
+    validated_payload = validate_generated_test_payload(coerce_generated_test_payload(payload))
     return validated_payload.model_dump(mode="json", exclude_none=True)
+
+
+def coerce_generated_test_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    coerced_payload = dict(payload)
+    coerced_payload["evidence_refs"] = coerce_evidence_refs(coerced_payload.get("evidence_refs", []))
+
+    test_type = coerced_payload.get("type")
+    if test_type in {"mcq_single", "mcq_multi"}:
+        coerced_payload = coerce_mcq_payload(coerced_payload)
+
+    return coerced_payload
+
+
+def coerce_evidence_refs(value: Any) -> list[Any]:
+    if not isinstance(value, list):
+        return value
+
+    evidence_refs: list[Any] = []
+    for item in value:
+        if isinstance(item, str):
+            evidence_refs.append(
+                {
+                    "source_type": source_type_from_uri(item),
+                    "source_uri": item,
+                }
+            )
+            continue
+        if isinstance(item, dict):
+            evidence_ref = dict(item)
+            source_uri = evidence_ref.get("source_uri")
+            if isinstance(source_uri, str) and not evidence_ref.get("source_type"):
+                evidence_ref["source_type"] = source_type_from_uri(source_uri)
+            evidence_refs.append(evidence_ref)
+            continue
+        evidence_refs.append(item)
+    return evidence_refs
+
+
+def coerce_mcq_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    coerced_payload = dict(payload)
+    coerced_options = coerce_mcq_options(coerced_payload.get("options", []))
+    coerced_payload["options"] = coerced_options
+
+    if "correct_option_ids" not in coerced_payload:
+        answer = coerced_payload.get("answer", coerced_payload.get("correct_answer"))
+        correct_option_ids = correct_option_ids_from_answer(answer, coerced_options)
+        if correct_option_ids:
+            coerced_payload["correct_option_ids"] = correct_option_ids
+
+    coerced_payload.pop("answer", None)
+    coerced_payload.pop("correct_answer", None)
+    return coerced_payload
+
+
+def coerce_mcq_options(value: Any) -> Any:
+    if not isinstance(value, list):
+        return value
+
+    option_ids = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    options: list[Any] = []
+    for index, item in enumerate(value):
+        if isinstance(item, str):
+            option_id = option_ids[index] if index < len(option_ids) else str(index + 1)
+            options.append({"id": option_id, "text": item})
+            continue
+        options.append(item)
+    return options
+
+
+def correct_option_ids_from_answer(answer: Any, options: list[Any]) -> list[str]:
+    if answer is None:
+        return []
+
+    answers = answer if isinstance(answer, list) else [answer]
+    option_ids: list[str] = []
+    for raw_answer in answers:
+        if not isinstance(raw_answer, str):
+            continue
+        normalized_answer = raw_answer.strip().lower()
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            option_id = option.get("id")
+            option_text = option.get("text")
+            if not isinstance(option_id, str) or not isinstance(option_text, str):
+                continue
+            if normalized_answer in {option_id.strip().lower(), option_text.strip().lower()}:
+                option_ids.append(option_id)
+                break
+    return option_ids
+
+
+def source_type_from_uri(source_uri: str) -> str:
+    prefix, separator, _rest = source_uri.partition(":")
+    if separator and prefix:
+        return prefix
+    return "code"
 
 
 def validate_option_ids(options: list[McqOption], correct_option_ids: list[str]) -> None:
