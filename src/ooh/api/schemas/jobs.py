@@ -15,6 +15,7 @@ class JobDetailResponse(BaseModel):
     attempt_count: int
     max_attempts: int
     payload: dict[str, Any]
+    result_metadata: dict[str, Any]
     run_after: datetime
     locked_by: str | None
     locked_at: datetime | None
@@ -32,6 +33,7 @@ class JobDetailResponse(BaseModel):
             attempt_count=job.attempt_count,
             max_attempts=job.max_attempts,
             payload=job.payload,
+            result_metadata=job.result_metadata,
             run_after=job.run_after,
             locked_by=job.locked_by,
             locked_at=job.locked_at,

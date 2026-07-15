@@ -74,6 +74,7 @@ class JobResponse(BaseModel):
     repository_id: UUID | None
     job_type: JobType
     status: JobStatus
+    result_metadata: dict[str, Any]
     created_at: datetime
 
     @classmethod
@@ -83,6 +84,7 @@ class JobResponse(BaseModel):
             repository_id=job.repository_id,
             job_type=job.job_type,
             status=job.status,
+            result_metadata=job.result_metadata,
             created_at=job.created_at,
         )
 

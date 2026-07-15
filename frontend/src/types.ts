@@ -27,6 +27,7 @@ export type Job = {
   repository_id: string | null;
   job_type: string;
   status: JobStatus;
+  result_metadata: Record<string, unknown>;
   created_at: string;
 };
 

@@ -1,3 +1,4 @@
+from typing import Any
 from uuid import UUID
 
 from ooh.db.models import JobRead
@@ -18,8 +19,25 @@ class JobService:
     def claim_next(self, *, worker_id: str) -> JobRead | None:
         return self.job_repo.claim_next(worker_id=worker_id)
 
-    def mark_succeeded(self, job_id: UUID) -> JobRead:
-        return self.job_repo.mark_succeeded(job_id)
+    def mark_succeeded(
+        self,
+        job_id: UUID,
+        *,
+        result_metadata: dict[str, Any] | None = None,
+    ) -> JobRead:
+        return self.job_repo.mark_succeeded(job_id, result_metadata=result_metadata)
 
-    def mark_failed(self, job_id: UUID, *, error_summary: str, retry: bool = True) -> JobRead:
-        return self.job_repo.mark_failed(job_id, error_summary=error_summary, retry=retry)
+    def mark_failed(
+        self,
+        job_id: UUID,
+        *,
+        error_summary: str,
+        retry: bool = True,
+        result_metadata: dict[str, Any] | None = None,
+    ) -> JobRead:
+        return self.job_repo.mark_failed(
+            job_id,
+            error_summary=error_summary,
+            retry=retry,
+            result_metadata=result_metadata,
+        )

@@ -798,6 +798,10 @@ function JobPage({ jobId }: { jobId: string }) {
               <PanelHeader title="Payload" icon={<Package size={17} />} />
               <JsonBlock payload={job.data.payload} />
             </section>
+            <section className="panel">
+              <PanelHeader title="Result metadata" icon={<Database size={17} />} />
+              <JsonBlock payload={job.data.result_metadata} />
+            </section>
           </div>
         ) : null}
       </AsyncBoundary>

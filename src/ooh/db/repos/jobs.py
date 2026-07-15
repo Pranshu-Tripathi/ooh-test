@@ -61,12 +61,18 @@ class JobRepo:
             job.locked_at = now
             job.attempt_count += 1
             job.error_summary = None
+            job.result_metadata = {}
             job.updated_at = now
             session.flush()
             session.refresh(job)
             return JobRead.model_validate(job)
 
-    def mark_succeeded(self, job_id: UUID) -> JobRead:
+    def mark_succeeded(
+        self,
+        job_id: UUID,
+        *,
+        result_metadata: dict[str, Any] | None = None,
+    ) -> JobRead:
         now = datetime.now(UTC)
 
         with self.db.session() as session:
@@ -78,12 +84,20 @@ class JobRepo:
             job.locked_by = None
             job.locked_at = None
             job.error_summary = None
+            job.result_metadata = result_metadata or {}
             job.updated_at = now
             session.flush()
             session.refresh(job)
             return JobRead.model_validate(job)
 
-    def mark_failed(self, job_id: UUID, *, error_summary: str, retry: bool = True) -> JobRead:
+    def mark_failed(
+        self,
+        job_id: UUID,
+        *,
+        error_summary: str,
+        retry: bool = True,
+        result_metadata: dict[str, Any] | None = None,
+    ) -> JobRead:
         now = datetime.now(UTC)
 
         with self.db.session() as session:
@@ -97,6 +111,7 @@ class JobRepo:
             job.locked_by = None
             job.locked_at = None
             job.error_summary = error_summary[:1000]
+            job.result_metadata = result_metadata or {}
             job.updated_at = now
             session.flush()
             session.refresh(job)

@@ -32,6 +32,11 @@ class Job(Base):
     attempt_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="0")
     max_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="3")
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'::jsonb"))
+    result_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=sa.text("'{}'::jsonb"),
+    )
     run_after: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,
@@ -52,6 +57,7 @@ class JobRead(OrmModel):
     attempt_count: int
     max_attempts: int
     payload: dict[str, Any]
+    result_metadata: dict[str, Any]
     run_after: datetime
     locked_by: str | None
     locked_at: datetime | None
