@@ -1,7 +1,13 @@
+import json
+
 import pytest
 from pydantic import ValidationError
 
-from ooh.agent.contracts import normalize_generated_test_payload, validate_generated_test_payload
+from ooh.agent.contracts import (
+    generated_test_payload_json_schema,
+    normalize_generated_test_payload,
+    validate_generated_test_payload,
+)
 
 
 def test_short_answer_payload_normalizes() -> None:
@@ -23,6 +29,14 @@ def test_short_answer_payload_normalizes() -> None:
     assert payload["schema_version"] == 1
     assert payload["type"] == "short_answer"
     assert payload["expected_answer"] == "Use the cited repository guidance."
+
+
+def test_generated_test_payload_schema_includes_supported_test_types() -> None:
+    schema_text = json.dumps(generated_test_payload_json_schema())
+
+    assert "short_answer" in schema_text
+    assert "mcq_single" in schema_text
+    assert "mcq_multi" in schema_text
 
 
 def test_mcq_single_shorthand_payload_normalizes() -> None:

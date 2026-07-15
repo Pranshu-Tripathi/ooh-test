@@ -22,20 +22,23 @@ docker compose up --build
 Optionally copy `.env.example` to `.env` if you want to override ports, model names, or
 the read-only repository mount used by the worker.
 
+Default host-facing ports live in the `8500-8510` range to avoid common development ports:
+API/UI on `8500`, Postgres on `8501`, and the Vite dev server on `8502`.
+
 Useful endpoints once the API is running:
 
 ```bash
-curl http://localhost:8080/healthz
-curl http://localhost:8080/readyz
+curl http://localhost:8500/healthz
+curl http://localhost:8500/readyz
 ```
 
-Open the small dashboard at http://localhost:8080/ to register a repository, watch jobs,
+Open the small dashboard at http://localhost:8500/ to register a repository, watch jobs,
 generate a test, submit an answer, and inspect results.
 
 Register a local repository:
 
 ```bash
-curl -X POST http://localhost:8080/repositories \
+curl -X POST http://localhost:8500/repositories \
   -H "content-type: application/json" \
   -d '{"source_type":"local_path","source_uri":"/workspace"}'
 ```
@@ -43,7 +46,7 @@ curl -X POST http://localhost:8080/repositories \
 Register a public GitHub repository:
 
 ```bash
-curl -X POST http://localhost:8080/repositories \
+curl -X POST http://localhost:8500/repositories \
   -H "content-type: application/json" \
   -d '{"source_type":"github","source_uri":"https://github.com/owner/repo.git"}'
 ```
@@ -51,38 +54,38 @@ curl -X POST http://localhost:8080/repositories \
 Enqueue another ingest after new commits land:
 
 ```bash
-curl -X POST http://localhost:8080/repositories/{repository_id}/ingest-jobs
+curl -X POST http://localhost:8500/repositories/{repository_id}/ingest-jobs
 ```
 
 Poll any background job:
 
 ```bash
-curl http://localhost:8080/jobs/{job_id}
+curl http://localhost:8500/jobs/{job_id}
 ```
 
 List drift events for a repository:
 
 ```bash
-curl http://localhost:8080/repositories/{repository_id}/drift-events
+curl http://localhost:8500/repositories/{repository_id}/drift-events
 ```
 
 Build deterministic context packs from the latest snapshot:
 
 ```bash
-curl -X POST http://localhost:8080/repositories/{repository_id}/context-packs
+curl -X POST http://localhost:8500/repositories/{repository_id}/context-packs
 ```
 
 List context packs:
 
 ```bash
-curl http://localhost:8080/repositories/{repository_id}/context-packs
+curl http://localhost:8500/repositories/{repository_id}/context-packs
 ```
 
 Generate repository-specific tests from the latest snapshot. During smoke testing, request a
 single pack type so the local model does one focused generation first:
 
 ```bash
-curl -X POST http://localhost:8080/repositories/{repository_id}/generate-test-jobs \
+curl -X POST http://localhost:8500/repositories/{repository_id}/generate-test-jobs \
   -H "content-type: application/json" \
   -d '{"pack_types":["low_level_components"]}'
 ```
@@ -90,13 +93,13 @@ curl -X POST http://localhost:8080/repositories/{repository_id}/generate-test-jo
 After the job succeeds, list generated tests:
 
 ```bash
-curl http://localhost:8080/repositories/{repository_id}/generated-tests
+curl http://localhost:8500/repositories/{repository_id}/generated-tests
 ```
 
 Submit an answer and enqueue judging:
 
 ```bash
-curl -X POST http://localhost:8080/generated-tests/{generated_test_id}/answers \
+curl -X POST http://localhost:8500/generated-tests/{generated_test_id}/answers \
   -H "content-type: application/json" \
   -d '{"answer_text":"The component reads the repository snapshot and builds bounded context."}'
 ```
@@ -104,15 +107,15 @@ curl -X POST http://localhost:8080/generated-tests/{generated_test_id}/answers \
 After the judge job succeeds, inspect the scored result and any saved learnings:
 
 ```bash
-curl http://localhost:8080/generated-tests/{generated_test_id}/results
-curl http://localhost:8080/repositories/{repository_id}/test-results
-curl http://localhost:8080/repositories/{repository_id}/learnings
+curl http://localhost:8500/generated-tests/{generated_test_id}/results
+curl http://localhost:8500/repositories/{repository_id}/test-results
+curl http://localhost:8500/repositories/{repository_id}/learnings
 ```
 
 Create an active attention profile to weight drift by path:
 
 ```bash
-curl -X POST http://localhost:8080/repositories/{repository_id}/attention-profiles \
+curl -X POST http://localhost:8500/repositories/{repository_id}/attention-profiles \
   -H "content-type: application/json" \
   -d '{
     "name": "Backend heavy",

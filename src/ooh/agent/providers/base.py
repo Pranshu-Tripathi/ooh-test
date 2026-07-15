@@ -3,6 +3,7 @@ from typing import Any, Literal, Protocol
 
 ModelRole = Literal["system", "user", "assistant"]
 ResponseFormat = Literal["text", "json_object"]
+JsonSchema = dict[str, Any]
 
 
 class ModelProviderError(RuntimeError):
@@ -20,6 +21,7 @@ class ModelRequest:
     model: str
     messages: list[ModelMessage]
     response_format: ResponseFormat = "text"
+    response_schema: JsonSchema | None = None
     temperature: float | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 

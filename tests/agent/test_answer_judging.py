@@ -33,6 +33,8 @@ def test_build_answer_judging_request_asks_for_json() -> None:
 
     assert request.model == "deepseek-r1:8b"
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
+    assert "needs_review" in json.dumps(request.response_schema)
     assert request.metadata["prompt_version"] == "answer-judging-v1"
     assert "What matters?" in request.messages[1].content
     assert "Evidence matters." in request.messages[1].content
@@ -49,6 +51,7 @@ def test_build_answer_judging_repair_request_includes_error_and_invalid_output()
     )
 
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
     assert request.metadata["repair"] is True
     assert '{"score": 2}' in request.messages[1].content
     assert "score must be less than or equal to 1" in request.messages[1].content

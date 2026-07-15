@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-ooh}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ooh}
     ports:
-      - "5432:5432"
+      - "${OOH_POSTGRES_HOST_PORT:-8501}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -33,7 +33,7 @@ services:
       OOH_ENV: ${OOH_ENV:-development}
       OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
       OOH_API_HOST: ${OOH_API_HOST:-0.0.0.0}
-      OOH_API_PORT: ${OOH_API_PORT:-8080}
+      OOH_API_PORT: ${OOH_API_PORT:-8500}
       OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
       OOH_CACHE_ROOT: ${OOH_CACHE_ROOT:-/ooh_cache}
       OOH_MODEL_PROVIDER: ${OOH_MODEL_PROVIDER:-ollama}
@@ -41,7 +41,7 @@ services:
       OOH_TEST_GENERATOR_MODEL: ${OOH_TEST_GENERATOR_MODEL:-qwen3-coder:8b}
       OOH_ANSWER_JUDGE_MODEL: ${OOH_ANSWER_JUDGE_MODEL:-deepseek-r1:8b}
     ports:
-      - "8080:8080"
+      - "${OOH_API_HOST_PORT:-8500}:${OOH_API_PORT:-8500}"
     volumes:
       - ./.ooh_cache:/ooh_cache
       - ${OOH_REPOSITORY_MOUNT:-.:/workspace:ro}

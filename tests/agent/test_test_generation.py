@@ -37,6 +37,9 @@ def test_build_test_generation_request_asks_for_json() -> None:
 
     assert request.model == "qwen3-coder:8b"
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
+    assert "short_answer" in json.dumps(request.response_schema)
+    assert "mcq_single" in json.dumps(request.response_schema)
     assert request.metadata["prompt_version"] == "test-generation-v1"
     assert request.messages[0].role == "system"
     assert request.messages[1].role == "user"
@@ -52,6 +55,7 @@ def test_build_test_generation_repair_request_includes_error_and_invalid_output(
     )
 
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
     assert request.temperature == 0
     assert request.metadata["repair"] is True
     assert "expected_answer missing" in request.messages[1].content
@@ -76,6 +80,7 @@ def test_build_test_generation_evidence_feedback_request_includes_rejected_refs(
     )
 
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
     assert request.metadata["evidence_feedback"] is True
     assert "code:missing.py" in request.messages[1].content
     assert "code:src/app.py" in request.messages[1].content

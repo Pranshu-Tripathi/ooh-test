@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ooh.agent.contracts import normalize_generated_test_payload
+from ooh.agent.contracts import generated_test_payload_json_schema, normalize_generated_test_payload
 from ooh.agent.evidence import EvidenceVerificationResult, verify_generated_test_evidence
 from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, ModelResponse
 
@@ -177,6 +177,7 @@ def build_test_generation_request(*, model: str, context_pack: dict[str, Any]) -
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=generated_test_payload_json_schema(),
         temperature=0.2,
         messages=[
             ModelMessage(
@@ -213,6 +214,7 @@ def build_test_generation_repair_request(
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=generated_test_payload_json_schema(),
         temperature=0,
         messages=[
             ModelMessage(
@@ -250,6 +252,7 @@ def build_test_generation_evidence_feedback_request(
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=generated_test_payload_json_schema(),
         temperature=0.2,
         messages=[
             ModelMessage(

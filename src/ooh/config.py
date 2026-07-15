@@ -11,9 +11,9 @@ class Settings(BaseSettings):
     env: str = "development"
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"
-    api_port: int = 8080
+    api_port: int = 8500
     worker_poll_interval_seconds: int = Field(default=5, ge=1)
-    database_url: str = "postgresql://ooh:ooh@localhost:5432/ooh"
+    database_url: str = "postgresql://ooh:ooh@localhost:8501/ooh"
     cache_root: Path = Path("/ooh_cache")
     model_provider: str = "ollama"
     ollama_base_url: str = "http://host.docker.internal:11434"

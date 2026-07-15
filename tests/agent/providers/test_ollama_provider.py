@@ -1,5 +1,6 @@
+import io
 import json
-from urllib import request
+from urllib import error, request
 
 import pytest
 
@@ -59,6 +60,71 @@ def test_ollama_provider_posts_chat_payload_and_returns_generic_response() -> No
         "format": "json",
         "options": {"temperature": 0},
     }
+
+
+def test_ollama_provider_prefers_response_schema_over_json_mode() -> None:
+    captured_payloads: list[dict] = []
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    def transport(api_request: request.Request, _timeout_seconds: float) -> bytes:
+        captured_payloads.append(json.loads(api_request.data.decode("utf-8")))
+        return json.dumps({"message": {"content": "{\"answer\":\"ok\"}"}}).encode("utf-8")
+
+    provider = OllamaModelProvider(base_url="http://ollama.local", transport=transport)
+
+    provider.generate(
+        ModelRequest(
+            model="qwen3-coder:8b",
+            messages=[ModelMessage(role="user", content="Return an answer.")],
+            response_format="json_object",
+            response_schema=schema,
+        )
+    )
+
+    assert captured_payloads[0]["format"] == schema
+
+
+def test_ollama_provider_falls_back_to_json_mode_when_schema_format_is_unsupported() -> None:
+    captured_payloads: list[dict] = []
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    def transport(api_request: request.Request, _timeout_seconds: float) -> bytes:
+        captured_payloads.append(json.loads(api_request.data.decode("utf-8")))
+        if len(captured_payloads) == 1:
+            raise error.HTTPError(
+                api_request.full_url,
+                500,
+                "Internal Server Error",
+                {},
+                io.BytesIO(b'{"error":"failed to load model vocabulary required for format"}'),
+            )
+        return json.dumps({"message": {"content": "{\"answer\":\"ok\"}"}}).encode("utf-8")
+
+    provider = OllamaModelProvider(base_url="http://ollama.local", transport=transport)
+
+    response = provider.generate(
+        ModelRequest(
+            model="qwen3-coder:8b",
+            messages=[ModelMessage(role="user", content="Return an answer.")],
+            response_format="json_object",
+            response_schema=schema,
+        )
+    )
+
+    assert captured_payloads[0]["format"] == schema
+    assert captured_payloads[1]["format"] == "json"
+    assert response.content == "{\"answer\":\"ok\"}"
+    assert response.raw_response["_ooh"]["structured_output_fallback"] is True
 
 
 def test_ollama_provider_falls_back_to_requested_model() -> None:

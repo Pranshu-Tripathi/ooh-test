@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ooh.agent.contracts import normalize_judge_result_payload
+from ooh.agent.contracts import judge_result_payload_json_schema, normalize_judge_result_payload
 from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, ModelResponse
 from ooh.agent.test_generation import extract_json_object
 
@@ -120,6 +120,7 @@ def build_answer_judging_request(
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=judge_result_payload_json_schema(),
         temperature=0,
         messages=[
             ModelMessage(
@@ -157,6 +158,7 @@ def build_answer_judging_repair_request(
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=judge_result_payload_json_schema(),
         temperature=0,
         messages=[
             ModelMessage(

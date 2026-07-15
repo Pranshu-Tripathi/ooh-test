@@ -52,6 +52,10 @@ def validate_judge_result_payload(payload: dict[str, Any]) -> JudgeResultPayload
     return _judge_result_payload_adapter.validate_python(payload)
 
 
+def judge_result_payload_json_schema() -> dict[str, Any]:
+    return _judge_result_payload_adapter.json_schema()
+
+
 def normalize_judge_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
     validated_payload = validate_judge_result_payload(payload)
     return validated_payload.model_dump(mode="json", exclude_none=True)

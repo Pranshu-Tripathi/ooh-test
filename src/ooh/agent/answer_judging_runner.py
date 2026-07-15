@@ -172,6 +172,7 @@ class AnswerJudgingRunService:
                         for message in turn.request.messages
                     ],
                     "response_format": turn.request.response_format,
+                    "response_schema": turn.request.response_schema,
                     "temperature": turn.request.temperature,
                     "metadata": turn.request.metadata,
                 },

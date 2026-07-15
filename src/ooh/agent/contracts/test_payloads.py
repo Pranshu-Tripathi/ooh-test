@@ -91,6 +91,10 @@ def validate_generated_test_payload(payload: dict[str, Any]) -> GeneratedTestPay
     return _generated_test_payload_adapter.validate_python(payload)
 
 
+def generated_test_payload_json_schema() -> dict[str, Any]:
+    return _generated_test_payload_adapter.json_schema()
+
+
 def normalize_generated_test_payload(payload: dict[str, Any]) -> dict[str, Any]:
     validated_payload = validate_generated_test_payload(coerce_generated_test_payload(payload))
     return validated_payload.model_dump(mode="json", exclude_none=True)
