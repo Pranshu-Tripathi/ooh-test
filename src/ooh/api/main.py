@@ -2,8 +2,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 from ooh import __version__
@@ -16,7 +17,9 @@ from ooh.db import check_database, check_schema_current
 from ooh.logging import configure_logging
 
 settings = get_settings()
-UI_INDEX_PATH = Path(__file__).resolve().parent / "static" / "index.html"
+FRONTEND_DIST_PATH = Path(__file__).resolve().parents[3] / "frontend" / "dist"
+FRONTEND_ASSETS_PATH = FRONTEND_DIST_PATH / "assets"
+FRONTEND_INDEX_PATH = FRONTEND_DIST_PATH / "index.html"
 
 
 @asynccontextmanager
@@ -31,11 +34,18 @@ app.include_router(jobs_router)
 app.include_router(repositories_router)
 app.include_router(tests_router)
 app.include_router(traces_router)
+if FRONTEND_ASSETS_PATH.exists():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_ASSETS_PATH), name="frontend-assets")
 
 
 @app.get("/", include_in_schema=False)
 def ui() -> FileResponse:
-    return FileResponse(UI_INDEX_PATH)
+    if not FRONTEND_INDEX_PATH.exists():
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="frontend build is not available",
+        )
+    return FileResponse(FRONTEND_INDEX_PATH)
 
 
 @app.get("/healthz")

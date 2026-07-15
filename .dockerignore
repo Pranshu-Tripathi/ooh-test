@@ -7,3 +7,6 @@ __pycache__
 *.pyc
 postgres_data
 ooh_cache
+frontend/dist
+frontend/node_modules
+frontend/*.tsbuildinfo

@@ -31,9 +31,6 @@ ooh-migrate = "ooh.migrations:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-"ooh.api" = ["static/*.html"]
-
 [tool.ruff]
 line-length = 100
 target-version = "py312"
