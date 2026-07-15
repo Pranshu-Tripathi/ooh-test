@@ -149,6 +149,13 @@ class AgentTraceRepo:
             ).all()
             return [AgentStepRead.model_validate(step) for step in steps]
 
+    def get_step(self, step_id: UUID) -> AgentStepRead | None:
+        with self.db.session() as session:
+            step = session.get(AgentStep, step_id)
+            if step is None:
+                return None
+            return AgentStepRead.model_validate(step)
+
     def mark_step_running(self, step_id: UUID) -> AgentStepRead:
         with self.db.session() as session:
             step = session.get(AgentStep, step_id)
@@ -205,6 +212,13 @@ class AgentTraceRepo:
                 .order_by(AgentArtifact.created_at)
             ).all()
             return [AgentArtifactRead.model_validate(artifact) for artifact in artifacts]
+
+    def get_artifact(self, artifact_id: UUID) -> AgentArtifactRead | None:
+        with self.db.session() as session:
+            artifact = session.get(AgentArtifact, artifact_id)
+            if artifact is None:
+                return None
+            return AgentArtifactRead.model_validate(artifact)
 
     def create_provenance_ref(self, input: ProvenanceRefInput) -> ProvenanceRefRead:
         with self.db.session() as session:

@@ -27,6 +27,7 @@ from ooh.services.jobs import JobService
 from ooh.services.learnings import LearningService
 from ooh.services.repositories import RepositoryService
 from ooh.services.test_generation import TestGenerationService
+from ooh.services.traces import TraceService
 from ooh.worker.context_pack_builder import ContextPackBuilder
 from ooh.worker.drift_scorer import GitDriftScorer
 from ooh.worker.repository_inspector import LocalRepositoryInspector
@@ -153,6 +154,14 @@ def build_learning_service(db: Database | None = None) -> LearningService:
     return LearningService(
         repository_repo=RepositoryRepo(db),
         saved_learning_repo=SavedLearningRepo(db),
+    )
+
+
+def build_trace_service(db: Database | None = None) -> TraceService:
+    db = db or get_database()
+    return TraceService(
+        agent_trace_repo=AgentTraceRepo(db),
+        repository_repo=RepositoryRepo(db),
     )
 
 
