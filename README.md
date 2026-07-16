@@ -142,6 +142,9 @@ call the configured local model through Ollama, validate schema and evidence ref
 generated tests plus agent traces. Judging jobs score submitted answers, persist result history,
 and save model-suggested learnings when returned.
 
+Local model calls default to a 300 second timeout. Override with
+`OOH_MODEL_TIMEOUT_SECONDS` in `.env` when running slower models or larger repositories.
+
 Phase 1 is being implemented in reviewable components.
 
 ## Migrations

@@ -14,10 +14,10 @@ TOOL_NAME = "repo.read_file_range"
 
 class ReadFileRangeArgs(RepoToolArgs):
     path: str
-    start_line: int = 1,
-    end_line: int | None = None,
-    max_lines: int = DEFAULT_READ_FILE_RANGE_LINES,
-    max_bytes: int = DEFAULT_READ_FILE_RANGE_BYTES,
+    start_line: int = 1
+    end_line: int | None = None
+    max_lines: int = DEFAULT_READ_FILE_RANGE_LINES
+    max_bytes: int = DEFAULT_READ_FILE_RANGE_BYTES
 
 
 class ReadFileRangeTool(RepoTool[ReadFileRangeArgs]):

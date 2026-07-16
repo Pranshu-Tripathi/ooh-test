@@ -18,9 +18,9 @@ TOOL_NAME = "repo.read_symbol"
 
 
 class ReadSymbolArgs(RepoToolArgs):
-    qualified_name: str | None = None,
-    name: str | None = None,
-    path: str | None = None,
+    qualified_name: str | None = None
+    name: str | None = None
+    path: str | None = None
 
 
 class ReadSymbolTool(RepoTool[ReadSymbolArgs]):

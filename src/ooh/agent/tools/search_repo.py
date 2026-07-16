@@ -24,10 +24,10 @@ TOOL_NAME = "repo.search_repo"
 
 class SearchRepoArgs(RepoToolArgs):
     query: str
-    path_prefix: str | None = None,
-    language: str | None = None,
-    case_sensitive: bool = False,
-    limit: int | None = None,
+    path_prefix: str | None = None
+    language: str | None = None
+    case_sensitive: bool = False
+    limit: int | None = None
 
 
 class SearchRepoTool(RepoTool[SearchRepoArgs]):

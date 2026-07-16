@@ -17,9 +17,9 @@ TOOL_NAME = "repo.list_symbols"
 
 
 class ListSymbolsArgs(RepoToolArgs):
-    path: str | None = None,
-    kind: str | None = None,
-    limit: int | None = None,
+    path: str | None = None
+    kind: str | None = None
+    limit: int | None = None
 
 
 class ListSymbolsTool(RepoTool[ListSymbolsArgs]):

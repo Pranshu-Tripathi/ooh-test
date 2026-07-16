@@ -13,14 +13,6 @@ from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, Model
 TEST_GENERATION_PROMPT_VERSION = "test-generation-v1"
 
 
-class GeneratedTestPayloadError(RuntimeError):
-    pass
-
-
-class GeneratedTestEvidenceError(RuntimeError):
-    pass
-
-
 @dataclass(frozen=True)
 class GeneratedTestCandidate:
     payload: dict[str, Any]
@@ -45,6 +37,28 @@ class GeneratedTestLoopResult:
     payload: dict[str, Any]
     turns: list[GeneratedTestLoopTurn]
     prompt_version: str
+
+
+class GeneratedTestPayloadError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        turns: list[GeneratedTestLoopTurn] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.turns = list(turns or [])
+
+
+class GeneratedTestEvidenceError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        turns: list[GeneratedTestLoopTurn] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.turns = list(turns or [])
 
 
 class GeneratedTestAgentLoop:
@@ -92,7 +106,8 @@ class GeneratedTestAgentLoop:
                 )
                 if repair_attempts >= self.max_repair_attempts:
                     raise GeneratedTestPayloadError(
-                        f"model output did not become valid after {sequence} attempts: {validation_error}"
+                        f"model output did not become valid after {sequence} attempts: {validation_error}",
+                        turns=turns,
                     ) from exc
                 repair_attempts += 1
                 request = build_test_generation_repair_request(
@@ -122,7 +137,8 @@ class GeneratedTestAgentLoop:
                 if evidence_regenerations >= self.max_evidence_regenerations:
                     raise GeneratedTestEvidenceError(
                         "model output did not reference valid evidence after "
-                        f"{sequence} attempts: {evidence_error}"
+                        f"{sequence} attempts: {evidence_error}",
+                        turns=turns,
                     )
                 evidence_regenerations += 1
                 request = build_test_generation_evidence_feedback_request(
@@ -174,6 +190,12 @@ class GeneratedTestPipeline:
 
 
 def build_test_generation_request(*, model: str, context_pack: dict[str, Any]) -> ModelRequest:
+    tool_inspection_hint = (
+        " Use tool_inspection results when present; prefer evidence from tool calls for "
+        "symbol-level or line-level questions."
+        if "tool_inspection" in context_pack
+        else ""
+    )
     return ModelRequest(
         model=model,
         response_format="json_object",
@@ -187,6 +209,7 @@ def build_test_generation_request(*, model: str, context_pack: dict[str, Any]) -
                     "Return exactly one JSON object and no prose. The JSON must match one of "
                     "these types: short_answer, mcq_single, mcq_multi. Include evidence_refs "
                     "using source_uri values present in the context pack when possible. "
+                    f"{tool_inspection_hint}"
                     "For MCQ options, use objects like {\"id\":\"A\",\"text\":\"...\"}; "
                     "use correct_option_ids, not answer."
                 ),

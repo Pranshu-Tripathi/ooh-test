@@ -141,6 +141,22 @@ def test_ollama_provider_falls_back_to_requested_model() -> None:
     assert response.content == "ok"
 
 
+def test_ollama_provider_wraps_timeout_errors() -> None:
+    def transport(_api_request: request.Request, _timeout_seconds: float) -> bytes:
+        raise TimeoutError("timed out")
+
+    provider = OllamaModelProvider(
+        base_url="http://ollama.local",
+        timeout_seconds=12,
+        transport=transport,
+    )
+
+    with pytest.raises(ModelProviderError, match="timed out after 12s"):
+        provider.generate(
+            ModelRequest(model="qwen3-coder:8b", messages=[ModelMessage(role="user", content="Hello")])
+        )
+
+
 def test_ollama_provider_rejects_invalid_json_response() -> None:
     def transport(_api_request: request.Request, _timeout_seconds: float) -> bytes:
         return b"not-json"

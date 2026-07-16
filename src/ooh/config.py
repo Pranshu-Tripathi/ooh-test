@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     cache_root: Path = Path("/ooh_cache")
     model_provider: str = "ollama"
     ollama_base_url: str = "http://host.docker.internal:11434"
+    model_timeout_seconds: float = Field(default=300, gt=0)
     test_generator_model: str = "qwen3-coder:8b"
     answer_judge_model: str = "deepseek-r1:8b"
 

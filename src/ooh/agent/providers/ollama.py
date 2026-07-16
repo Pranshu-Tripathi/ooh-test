@@ -31,6 +31,10 @@ class OllamaModelProvider:
     def generate(self, model_request: ModelRequest) -> ModelResponse:
         try:
             return self._generate_once(model_request)
+        except TimeoutError as exc:
+            raise ModelProviderError(
+                f"ollama request timed out after {self.timeout_seconds:g}s"
+            ) from exc
         except error.HTTPError as exc:
             detail = self._http_error_detail(exc)
             if self._should_retry_without_schema(model_request, detail):
@@ -77,6 +81,10 @@ class OllamaModelProvider:
         fallback_request = replace(model_request, response_schema=None)
         try:
             response = self._generate_once(fallback_request)
+        except TimeoutError as exc:
+            raise ModelProviderError(
+                f"ollama request timed out after {self.timeout_seconds:g}s"
+            ) from exc
         except error.HTTPError as exc:
             detail = self._http_error_detail(exc)
             raise ModelProviderError(f"ollama request failed: {exc.code} {detail}") from exc

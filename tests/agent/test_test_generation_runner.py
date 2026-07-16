@@ -1,5 +1,6 @@
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -22,6 +23,9 @@ from ooh.db.models import (
     GeneratedTestRead,
     ProvenanceRefRead,
     ProvenanceRefType,
+    RepositoryRead,
+    RepositorySourceType,
+    RepositoryStatus,
 )
 from ooh.db.repos import (
     AgentArtifactInput,
@@ -31,6 +35,7 @@ from ooh.db.repos import (
     GeneratedTestInput,
     ProvenanceRefInput,
 )
+from ooh.worker.repository_inspector import LocalRepositoryInspector
 
 
 class FakeProvider:
@@ -245,6 +250,63 @@ def test_generated_test_run_service_persists_tests_and_trace_artifacts(tmp_path)
     assert provider.requests[0].response_format == "json_object"
 
 
+def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_path: Path) -> None:
+    provider = FakeProvider(
+        json.dumps(
+            {
+                "type": "short_answer",
+                "question": "Which method uppercases the value?",
+                "expected_answer": "Service.handle uppercases the value.",
+                "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+            }
+        )
+    )
+    trace_repo = FakeAgentTraceRepo()
+    generated_test_repo = FakeGeneratedTestRepo()
+    service = GeneratedTestRunService(
+        provider=provider,
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path / "artifacts"),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=generated_test_repo,
+    )
+
+    context_pack = build_context_pack_with_snapshot(tmp_path)
+
+    result = service.generate_for_context_packs([context_pack], job_id=uuid4())
+
+    assert result.agent_run.status == AgentStatus.SUCCEEDED
+    assert generated_test_repo.inputs[0].test_payload["evidence_refs"][0]["source_uri"] == (
+        "code:src/app.py"
+    )
+
+    steps_by_sequence = sorted(trace_repo.steps.values(), key=lambda step: step.sequence)
+    assert [step.step_type for step in steps_by_sequence] == [
+        AgentStepType.TOOL_CALL,
+        AgentStepType.TOOL_CALL,
+        AgentStepType.TOOL_CALL,
+        AgentStepType.GENERATE_QUESTIONS,
+        AgentStepType.PERSIST_RESULT,
+    ]
+    assert all(step.status == AgentStatus.SUCCEEDED for step in steps_by_sequence)
+    tool_steps = [step for step in steps_by_sequence if step.step_type == AgentStepType.TOOL_CALL]
+    assert [step.input_summary["tool_name"] for step in tool_steps] == [
+        "repo.list_files",
+        "repo.list_symbols",
+        "repo.read_file_range",
+    ]
+
+    artifact_types = [artifact.artifact_type for artifact in trace_repo.artifacts]
+    assert artifact_types.count(AgentArtifactType.TOOL_CALL_RESULT) == 3
+    assert AgentArtifactType.PROMPT in artifact_types
+    assert ProvenanceRefType.CODE in [ref.ref_type for ref in trace_repo.provenance_refs]
+
+    prompt = provider.requests[0].messages[1].content
+    assert "tool_inspection" in prompt
+    assert "Service.handle" in prompt
+    assert "return value.upper()" in prompt
+
+
 def test_generated_test_run_service_marks_run_failed_on_invalid_model_output(tmp_path) -> None:
     trace_repo = FakeAgentTraceRepo()
     service = GeneratedTestRunService(
@@ -260,6 +322,17 @@ def test_generated_test_run_service_marks_run_failed_on_invalid_model_output(tmp
 
     assert list(trace_repo.runs.values())[0].status == AgentStatus.FAILED
     assert any(step.status == AgentStatus.FAILED for step in trace_repo.steps.values())
+    assert [artifact.artifact_type for artifact in trace_repo.artifacts] == [
+        AgentArtifactType.PROMPT,
+        AgentArtifactType.RAW_MODEL_RESPONSE,
+        AgentArtifactType.TRACE,
+        AgentArtifactType.PROMPT,
+        AgentArtifactType.RAW_MODEL_RESPONSE,
+        AgentArtifactType.TRACE,
+    ]
+    artifact_names = [artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts]
+    assert any("turn-1-generate-validation-error" in name for name in artifact_names)
+    assert any("turn-2-repair-validation-error" in name for name in artifact_names)
 
 
 def test_generated_test_run_service_records_repair_turn_artifacts(tmp_path) -> None:
@@ -460,6 +533,117 @@ def build_context_pack(tmp_path) -> ContextPackWithSources:
             ),
         ],
     )
+
+
+def build_context_pack_with_snapshot(tmp_path: Path) -> ContextPackWithSources:
+    repository_path = tmp_path / "repo"
+    repository_path.mkdir()
+    write_git_head(repository_path, "abc1234567890abc1234567890abc1234567890abc")
+    write_file(
+        repository_path / "src" / "app.py",
+        "\n".join(
+            [
+                "class Service:",
+                "    def handle(self, value: str) -> str:",
+                "        return value.upper()",
+                "",
+            ]
+        ),
+    )
+
+    inspector = LocalRepositoryInspector(cache_root=tmp_path / "cache")
+    snapshot = inspector.inspect_path(build_repository(repository_path), repository_path)
+    snapshot_id_value = uuid4()
+    repository_id = uuid4()
+    context_pack_id = uuid4()
+    code_hash = snapshot_file_hash(snapshot.index_uri, "src/app.py")
+    artifact_path = tmp_path / "context-pack-with-snapshot.json"
+    artifact_path.write_text(
+        json.dumps(
+            {
+                "pack_type": "low_level_components",
+                "snapshot": {
+                    "id": str(snapshot_id_value),
+                    "commit_sha": snapshot.commit_sha,
+                    "index_uri": snapshot.index_uri,
+                },
+                "included_files": [
+                    {
+                        "path": "src/app.py",
+                        "sha256": code_hash,
+                        "language": "python",
+                        "parse_status": "parsed",
+                    }
+                ],
+                "source_refs": [
+                    {
+                        "source_type": "code",
+                        "source_uri": "code:src/app.py",
+                        "content_hash": code_hash,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return ContextPackWithSources(
+        context_pack=ContextPackRead(
+            id=context_pack_id,
+            repository_id=repository_id,
+            snapshot_id=snapshot_id_value,
+            attention_profile_id=None,
+            pack_type=ContextPackType.LOW_LEVEL_COMPONENTS,
+            artifact_uri=str(artifact_path),
+            content_hash="context-pack-hash",
+            created_at=now(),
+        ),
+        sources=[
+            ContextPackSourceRead(
+                id=uuid4(),
+                context_pack_id=context_pack_id,
+                source_type=ContextPackSourceType.CODE,
+                source_uri="code:src/app.py",
+                content_hash=code_hash,
+                created_at=now(),
+            )
+        ],
+    )
+
+
+def build_repository(repository_path: Path) -> RepositoryRead:
+    current_time = now()
+    return RepositoryRead(
+        id=uuid4(),
+        name="repo",
+        source_type=RepositorySourceType.LOCAL_PATH,
+        source_uri=str(repository_path),
+        default_branch=None,
+        token_ref=None,
+        status=RepositoryStatus.PENDING,
+        last_processed_commit_sha=None,
+        last_indexed_at=None,
+        created_at=current_time,
+        updated_at=current_time,
+    )
+
+
+def snapshot_file_hash(index_uri: str, path: str) -> str:
+    manifest = json.loads(Path(index_uri).read_text(encoding="utf-8"))
+    for file in manifest["files"]:
+        if file["path"] == path:
+            return file["sha256"]
+    raise AssertionError(f"missing file hash for {path}")
+
+
+def write_git_head(repository_path: Path, commit_sha: str) -> None:
+    git_dir = repository_path / ".git"
+    git_dir.mkdir()
+    (git_dir / "HEAD").write_text(commit_sha, encoding="utf-8")
+
+
+def write_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def context_pack_drift_id() -> UUID:

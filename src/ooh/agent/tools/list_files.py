@@ -16,10 +16,10 @@ TOOL_NAME = "repo.list_files"
 
 
 class ListFilesArgs(RepoToolArgs):
-    path_prefix: str | None = None,
-    language: str | None = None,
-    parse_status: str | None = None,
-    limit: int | None = None,
+    path_prefix: str | None = None
+    language: str | None = None
+    parse_status: str | None = None
+    limit: int | None = None
 
 
 class ListFilesTool(RepoTool[ListFilesArgs]):

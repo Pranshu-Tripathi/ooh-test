@@ -8,9 +8,26 @@ from uuid import UUID
 
 from ooh.agent.artifacts import AgentArtifactStore
 from ooh.agent.providers import ModelProvider
+from ooh.agent.tool_inspection import (
+    FailedToolCall,
+    build_inspection_plan,
+    context_pack_with_tool_inspection,
+    inspection_prompt_payload,
+    snapshot_id,
+    snapshot_index_uri,
+)
 from ooh.agent.test_generation import (
     GeneratedTestAgentLoop,
+    GeneratedTestEvidenceError,
     GeneratedTestLoopTurn,
+    GeneratedTestPayloadError,
+)
+from ooh.agent.tools import (
+    AgentTraceToolRecorder,
+    RepoToolError,
+    RepositoryToolContext,
+    ToolExecution,
+    ToolExecutor,
 )
 from ooh.db.models import (
     AgentArtifactRead,
@@ -43,6 +60,12 @@ class GeneratedTestRunResult:
     generated_tests: list[GeneratedTestRead]
 
 
+GENERATION_STEP_SEQUENCE = 10_000
+PERSIST_STEP_SEQUENCE = 20_000
+TOOL_CALL_SEQUENCE_BASE = 100
+TOOL_CALL_SEQUENCE_PACK_STRIDE = 1_000
+
+
 class GeneratedTestRunService:
     def __init__(
         self,
@@ -59,6 +82,12 @@ class GeneratedTestRunService:
         self.agent_trace_repo = agent_trace_repo
         self.generated_test_repo = generated_test_repo
         self.agent_loop = GeneratedTestAgentLoop(provider, model=model)
+        self.tool_executor = ToolExecutor(
+            recorder=AgentTraceToolRecorder(
+                agent_trace_repo=agent_trace_repo,
+                artifact_store=artifact_store,
+            )
+        )
 
     def generate_for_context_packs(
         self,
@@ -81,10 +110,16 @@ class GeneratedTestRunService:
         persist_step: AgentStepRead | None = None
         try:
             generation_step = self._create_generation_step(agent_run.id, context_packs)
-            generated_test_inputs = [
-                self._generate_for_context_pack(agent_run.id, generation_step, context_pack)
-                for context_pack in context_packs
-            ]
+            generated_test_inputs: list[GeneratedTestInput] = []
+            for context_pack_index, context_pack in enumerate(context_packs):
+                generated_test_inputs.append(
+                    self._generate_for_context_pack(
+                        agent_run.id,
+                        generation_step,
+                        context_pack,
+                        context_pack_index=context_pack_index,
+                    )
+                )
             generation_step = self.agent_trace_repo.mark_step_finished(
                 generation_step.id,
                 status=AgentStatus.SUCCEEDED,
@@ -117,9 +152,26 @@ class GeneratedTestRunService:
         agent_run_id: UUID,
         generation_step: AgentStepRead,
         context_pack: ContextPackWithSources,
+        *,
+        context_pack_index: int,
     ) -> GeneratedTestInput:
         context_pack_payload = self._read_context_pack(context_pack.context_pack.artifact_uri)
-        loop_result = self.agent_loop.run(context_pack_payload)
+        context_pack_payload = self._inspect_context_pack(
+            agent_run_id=agent_run_id,
+            context_pack_payload=context_pack_payload,
+            context_pack_index=context_pack_index,
+        )
+        try:
+            loop_result = self.agent_loop.run(context_pack_payload)
+        except (GeneratedTestPayloadError, GeneratedTestEvidenceError) as exc:
+            if exc.turns:
+                self._write_turn_artifacts(
+                    agent_run_id=agent_run_id,
+                    generation_step_id=generation_step.id,
+                    context_pack_id=context_pack.context_pack.id,
+                    turns=exc.turns,
+                )
+            raise
         prompt_artifact = self._write_turn_artifacts(
             agent_run_id=agent_run_id,
             generation_step_id=generation_step.id,
@@ -393,7 +445,7 @@ class GeneratedTestRunService:
             AgentStepInput(
                 agent_run_id=agent_run_id,
                 step_type=AgentStepType.GENERATE_QUESTIONS,
-                sequence=1,
+                sequence=GENERATION_STEP_SEQUENCE,
                 input_summary={"context_pack_count": len(context_packs)},
             )
         )
@@ -408,11 +460,68 @@ class GeneratedTestRunService:
             AgentStepInput(
                 agent_run_id=agent_run_id,
                 step_type=AgentStepType.PERSIST_RESULT,
-                sequence=2,
+                sequence=PERSIST_STEP_SEQUENCE,
                 input_summary={"generated_candidate_count": len(generated_test_inputs)},
             )
         )
         return self.agent_trace_repo.mark_step_running(step.id)
+
+    def _inspect_context_pack(
+        self,
+        *,
+        agent_run_id: UUID,
+        context_pack_payload: dict[str, Any],
+        context_pack_index: int,
+    ) -> dict[str, Any]:
+        index_uri = snapshot_index_uri(context_pack_payload)
+        if index_uri is None:
+            return context_pack_payload
+
+        planned_calls = build_inspection_plan(context_pack_payload)
+        if not planned_calls:
+            return context_pack_payload
+
+        tool_context = RepositoryToolContext.from_index_uri(
+            index_uri,
+            snapshot_id=snapshot_id(context_pack_payload),
+        )
+        executions: list[ToolExecution] = []
+        failed_calls: list[FailedToolCall] = []
+        sequence_base = TOOL_CALL_SEQUENCE_BASE + (
+            context_pack_index * TOOL_CALL_SEQUENCE_PACK_STRIDE
+        )
+
+        for call_index, planned_call in enumerate(planned_calls):
+            try:
+                execution = self.tool_executor.execute(
+                    tool_name=planned_call.tool_name,
+                    context=tool_context,
+                    arguments=planned_call.arguments,
+                    agent_run_id=agent_run_id,
+                    sequence=sequence_base + call_index,
+                    call_id=planned_call.call_id,
+                )
+            except RepoToolError as exc:
+                failed_calls.append(
+                    FailedToolCall(
+                        call_id=planned_call.call_id,
+                        tool_name=planned_call.tool_name,
+                        arguments=planned_call.arguments,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                )
+                continue
+            executions.append(execution)
+
+        return context_pack_with_tool_inspection(
+            context_pack_payload,
+            inspection_prompt_payload(
+                planned_calls=planned_calls,
+                executions=executions,
+                failed_calls=failed_calls,
+            ),
+        )
 
     @staticmethod
     def _read_context_pack(artifact_uri: str) -> dict[str, Any]:

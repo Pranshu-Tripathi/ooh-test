@@ -46,6 +46,26 @@ def test_build_test_generation_request_asks_for_json() -> None:
     assert "high_level_design" in request.messages[1].content
 
 
+def test_build_test_generation_request_mentions_tool_inspection_when_present() -> None:
+    request = build_test_generation_request(
+        model="qwen3-coder:8b",
+        context_pack={
+            "pack_type": "low_level_components",
+            "tool_inspection": {
+                "tool_calls": [
+                    {
+                        "tool_name": "repo.read_symbol",
+                        "payload": {"symbol": {"qualified_name": "Service.handle"}},
+                    }
+                ]
+            },
+        },
+    )
+
+    assert "tool_inspection" in request.messages[0].content
+    assert "Service.handle" in request.messages[1].content
+
+
 def test_build_test_generation_repair_request_includes_error_and_invalid_output() -> None:
     request = build_test_generation_repair_request(
         model="qwen3-coder:8b",
@@ -181,10 +201,12 @@ def test_agent_loop_fails_after_repair_budget() -> None:
     provider = FakeProvider('{"type": "short_answer", "question": "Missing answer"}')
     loop = GeneratedTestAgentLoop(provider, model="qwen3-coder:8b", max_repair_attempts=1)
 
-    with pytest.raises(GeneratedTestPayloadError, match="after 2 attempts"):
+    with pytest.raises(GeneratedTestPayloadError, match="after 2 attempts") as exc_info:
         loop.run({"pack_type": "active_pr"})
 
     assert len(provider.requests) == 2
+    assert [turn.action for turn in exc_info.value.turns] == ["generate", "repair"]
+    assert all(turn.validation_error is not None for turn in exc_info.value.turns)
 
 
 def test_agent_loop_regenerates_invalid_evidence_refs() -> None:
@@ -244,7 +266,7 @@ def test_agent_loop_fails_after_evidence_regeneration_budget() -> None:
     )
     loop = GeneratedTestAgentLoop(provider, model="qwen3-coder:8b", max_evidence_regenerations=1)
 
-    with pytest.raises(GeneratedTestEvidenceError, match="after 2 attempts"):
+    with pytest.raises(GeneratedTestEvidenceError, match="after 2 attempts") as exc_info:
         loop.run(
             {
                 "pack_type": "active_pr",
@@ -253,6 +275,11 @@ def test_agent_loop_fails_after_evidence_regeneration_budget() -> None:
         )
 
     assert len(provider.requests) == 2
+    assert [turn.action for turn in exc_info.value.turns] == [
+        "generate",
+        "regenerate_evidence",
+    ]
+    assert all(turn.evidence_error is not None for turn in exc_info.value.turns)
 
 
 def test_pipeline_accepts_protocol_provider() -> None:
