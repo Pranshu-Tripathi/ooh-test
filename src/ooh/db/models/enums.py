@@ -64,6 +64,7 @@ class AgentStepType(StrEnum):
     LOAD_REPOSITORY_STATE = "load_repository_state"
     BUILD_TEST_PLAN = "build_test_plan"
     BUILD_CONTEXT_PACK = "build_context_pack"
+    TOOL_CALL = "tool_call"
     GENERATE_QUESTIONS = "generate_questions"
     VALIDATE_OUTPUT = "validate_output"
     VERIFY_EVIDENCE = "verify_evidence"
@@ -78,6 +79,7 @@ class AgentArtifactType(StrEnum):
     INPUT = "input"
     CONTEXT_PACK = "context_pack"
     PROMPT = "prompt"
+    TOOL_CALL_RESULT = "tool_call_result"
     RAW_MODEL_RESPONSE = "raw_model_response"
     VALIDATED_OUTPUT = "validated_output"
     TRACE = "trace"
@@ -90,6 +92,7 @@ class ProvenanceRefType(StrEnum):
     MODEL = "model"
     SNAPSHOT = "snapshot"
     CONTEXT_PACK = "context_pack"
+    TOOL_CALL = "tool_call"
 
 
 class ContextPackType(StrEnum):
