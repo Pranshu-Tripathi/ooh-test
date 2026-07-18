@@ -1,5 +1,6 @@
 import io
 import json
+import logging
 from urllib import error, request
 
 import pytest
@@ -62,7 +63,7 @@ def test_ollama_provider_posts_chat_payload_and_returns_generic_response() -> No
     }
 
 
-def test_ollama_provider_prefers_response_schema_over_json_mode() -> None:
+def test_ollama_provider_prefers_response_schema_over_json_mode(caplog) -> None:
     captured_payloads: list[dict] = []
     schema = {
         "type": "object",
@@ -77,41 +78,7 @@ def test_ollama_provider_prefers_response_schema_over_json_mode() -> None:
 
     provider = OllamaModelProvider(base_url="http://ollama.local", transport=transport)
 
-    provider.generate(
-        ModelRequest(
-            model="qwen3-coder:8b",
-            messages=[ModelMessage(role="user", content="Return an answer.")],
-            response_format="json_object",
-            response_schema=schema,
-        )
-    )
-
-    assert captured_payloads[0]["format"] == schema
-
-
-def test_ollama_provider_falls_back_to_json_mode_when_schema_format_is_unsupported() -> None:
-    captured_payloads: list[dict] = []
-    schema = {
-        "type": "object",
-        "properties": {"answer": {"type": "string"}},
-        "required": ["answer"],
-        "additionalProperties": False,
-    }
-
-    def transport(api_request: request.Request, _timeout_seconds: float) -> bytes:
-        captured_payloads.append(json.loads(api_request.data.decode("utf-8")))
-        if len(captured_payloads) == 1:
-            raise error.HTTPError(
-                api_request.full_url,
-                500,
-                "Internal Server Error",
-                {},
-                io.BytesIO(b'{"error":"failed to load model vocabulary required for format"}'),
-            )
-        return json.dumps({"message": {"content": "{\"answer\":\"ok\"}"}}).encode("utf-8")
-
-    provider = OllamaModelProvider(base_url="http://ollama.local", transport=transport)
-
+    caplog.set_level(logging.INFO, logger="ooh.agent.providers.ollama")
     response = provider.generate(
         ModelRequest(
             model="qwen3-coder:8b",
@@ -122,9 +89,49 @@ def test_ollama_provider_falls_back_to_json_mode_when_schema_format_is_unsupport
     )
 
     assert captured_payloads[0]["format"] == schema
-    assert captured_payloads[1]["format"] == "json"
-    assert response.content == "{\"answer\":\"ok\"}"
-    assert response.raw_response["_ooh"]["structured_output_fallback"] is True
+    assert response.raw_response["_ooh"]["output_mode"] == "json_schema"
+    assert response.raw_response["_ooh"]["schema_enforced"] is True
+    assert response.raw_response["_ooh"]["timeout_seconds"] == 120
+    assert "llm call started" in caplog.text
+    assert "llm call succeeded" in caplog.text
+
+
+def test_ollama_provider_fails_when_schema_format_is_unsupported(caplog) -> None:
+    captured_payloads: list[dict] = []
+    schema = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+        "additionalProperties": False,
+    }
+
+    def transport(api_request: request.Request, _timeout_seconds: float) -> bytes:
+        captured_payloads.append(json.loads(api_request.data.decode("utf-8")))
+        raise error.HTTPError(
+            api_request.full_url,
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b'{"error":"failed to load model vocabulary required for format"}'),
+        )
+
+    provider = OllamaModelProvider(base_url="http://ollama.local", transport=transport)
+
+    caplog.set_level(logging.INFO, logger="ooh.agent.providers.ollama")
+    with pytest.raises(ModelProviderError, match="failed to load model vocabulary"):
+        provider.generate(
+            ModelRequest(
+                model="qwen3-coder:8b",
+                messages=[ModelMessage(role="user", content="Return an answer.")],
+                response_format="json_object",
+                response_schema=schema,
+            )
+        )
+
+    assert captured_payloads[0]["format"] == schema
+    assert len(captured_payloads) == 1
+    assert "llm call started" in caplog.text
+    assert "llm call failed" in caplog.text
 
 
 def test_ollama_provider_falls_back_to_requested_model() -> None:
@@ -141,7 +148,7 @@ def test_ollama_provider_falls_back_to_requested_model() -> None:
     assert response.content == "ok"
 
 
-def test_ollama_provider_wraps_timeout_errors() -> None:
+def test_ollama_provider_wraps_timeout_errors(caplog) -> None:
     def transport(_api_request: request.Request, _timeout_seconds: float) -> bytes:
         raise TimeoutError("timed out")
 
@@ -151,10 +158,14 @@ def test_ollama_provider_wraps_timeout_errors() -> None:
         transport=transport,
     )
 
+    caplog.set_level(logging.INFO, logger="ooh.agent.providers.ollama")
     with pytest.raises(ModelProviderError, match="timed out after 12s"):
         provider.generate(
             ModelRequest(model="qwen3-coder:8b", messages=[ModelMessage(role="user", content="Hello")])
         )
+
+    assert "llm call started" in caplog.text
+    assert "llm call failed" in caplog.text
 
 
 def test_ollama_provider_rejects_invalid_json_response() -> None:

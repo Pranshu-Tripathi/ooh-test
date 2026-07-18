@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,10 @@ from uuid import UUID
 
 from ooh.agent.artifacts import AgentArtifactStore
 from ooh.agent.providers import ModelProvider
+from ooh.agent.prompt_budget import (
+    DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+    DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+)
 from ooh.agent.tool_inspection import (
     FailedToolCall,
     build_inspection_plan,
@@ -53,6 +58,8 @@ from ooh.db.repos import (
     ProvenanceRefInput,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class GeneratedTestRunResult:
@@ -75,13 +82,21 @@ class GeneratedTestRunService:
         artifact_store: AgentArtifactStore,
         agent_trace_repo: AgentTraceRepo,
         generated_test_repo: GeneratedTestRepo,
+        max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+        max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
     ) -> None:
         self.provider = provider
         self.model = model
         self.artifact_store = artifact_store
         self.agent_trace_repo = agent_trace_repo
         self.generated_test_repo = generated_test_repo
-        self.agent_loop = GeneratedTestAgentLoop(provider, model=model)
+        self.max_tool_observation_bytes = max_tool_observation_bytes
+        self.agent_loop = GeneratedTestAgentLoop(
+            provider,
+            model=model,
+            max_prompt_bytes=max_prompt_bytes,
+            max_tool_observation_bytes=max_tool_observation_bytes,
+        )
         self.tool_executor = ToolExecutor(
             recorder=AgentTraceToolRecorder(
                 agent_trace_repo=agent_trace_repo,
@@ -105,6 +120,15 @@ class GeneratedTestRunService:
             )
         )
         agent_run = self.agent_trace_repo.mark_run_running(agent_run.id)
+        logger.info(
+            "test generation run started agent_run_id=%s job_id=%s repository_id=%s "
+            "context_pack_count=%s model=%s",
+            agent_run.id,
+            job_id,
+            repository_id,
+            len(context_packs),
+            self.model,
+        )
 
         generation_step: AgentStepRead | None = None
         persist_step: AgentStepRead | None = None
@@ -112,13 +136,45 @@ class GeneratedTestRunService:
             generation_step = self._create_generation_step(agent_run.id, context_packs)
             generated_test_inputs: list[GeneratedTestInput] = []
             for context_pack_index, context_pack in enumerate(context_packs):
-                generated_test_inputs.append(
-                    self._generate_for_context_pack(
+                logger.info(
+                    "test generation context pack started agent_run_id=%s context_pack_id=%s "
+                    "pack_type=%s position=%s/%s",
+                    agent_run.id,
+                    context_pack.context_pack.id,
+                    context_pack.context_pack.pack_type.value,
+                    context_pack_index + 1,
+                    len(context_packs),
+                )
+                try:
+                    generated_test_input = self._generate_for_context_pack(
                         agent_run.id,
                         generation_step,
                         context_pack,
                         context_pack_index=context_pack_index,
                     )
+                except Exception as exc:
+                    logger.error(
+                        "test generation context pack failed agent_run_id=%s context_pack_id=%s "
+                        "pack_type=%s position=%s/%s error_type=%s error=%s",
+                        agent_run.id,
+                        context_pack.context_pack.id,
+                        context_pack.context_pack.pack_type.value,
+                        context_pack_index + 1,
+                        len(context_packs),
+                        type(exc).__name__,
+                        str(exc),
+                    )
+                    raise
+                generated_test_inputs.append(generated_test_input)
+                logger.info(
+                    "test generation context pack succeeded agent_run_id=%s context_pack_id=%s "
+                    "pack_type=%s position=%s/%s test_type=%s",
+                    agent_run.id,
+                    context_pack.context_pack.id,
+                    context_pack.context_pack.pack_type.value,
+                    context_pack_index + 1,
+                    len(context_packs),
+                    generated_test_input.test_payload.get("type"),
                 )
             generation_step = self.agent_trace_repo.mark_step_finished(
                 generation_step.id,
@@ -144,6 +200,11 @@ class GeneratedTestRunService:
         agent_run = self.agent_trace_repo.mark_run_finished(
             agent_run.id,
             status=AgentStatus.SUCCEEDED,
+        )
+        logger.info(
+            "test generation run succeeded agent_run_id=%s generated_test_count=%s",
+            agent_run.id,
+            len(generated_tests),
         )
         return GeneratedTestRunResult(agent_run=agent_run, generated_tests=generated_tests)
 
@@ -520,6 +581,7 @@ class GeneratedTestRunService:
                 planned_calls=planned_calls,
                 executions=executions,
                 failed_calls=failed_calls,
+                max_bytes=self.max_tool_observation_bytes,
             ),
         )
 

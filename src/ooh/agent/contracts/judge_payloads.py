@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
-from ooh.agent.contracts.test_payloads import EvidenceRef
+from ooh.agent.contracts.test_payloads import EvidenceRef, coerce_evidence_refs
 
 
 class StrictJudgeModel(BaseModel):
@@ -48,6 +48,23 @@ class JudgeResultPayload(StrictJudgeModel):
 _judge_result_payload_adapter = TypeAdapter(Annotated[JudgeResultPayload, Field()])
 
 
+class _WireSuggestedLearning(StrictJudgeModel):
+    title: str
+    summary: str
+
+
+class _JudgeResultWirePayload(StrictJudgeModel):
+    score: float
+    status: Literal["passing", "needs_review", "getting_out_of_hand"]
+    missed_concepts: list[str]
+    feedback: str
+    evidence_refs: list[str]
+    suggested_learning: _WireSuggestedLearning | None = None
+
+
+_judge_result_wire_adapter = TypeAdapter(Annotated[_JudgeResultWirePayload, Field()])
+
+
 def validate_judge_result_payload(payload: dict[str, Any]) -> JudgeResultPayload:
     return _judge_result_payload_adapter.validate_python(payload)
 
@@ -56,6 +73,21 @@ def judge_result_payload_json_schema() -> dict[str, Any]:
     return _judge_result_payload_adapter.json_schema()
 
 
+def judge_result_wire_json_schema(
+    *,
+    evidence_source_uris: list[str] | None = None,
+) -> dict[str, Any]:
+    schema = _judge_result_wire_adapter.json_schema()
+    source_uris = list(dict.fromkeys(evidence_source_uris or []))
+    if source_uris:
+        schema["properties"]["evidence_refs"]["items"]["enum"] = source_uris
+    return schema
+
+
 def normalize_judge_result_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    validated_payload = validate_judge_result_payload(payload)
+    coerced_payload = {
+        **payload,
+        "evidence_refs": coerce_evidence_refs(payload.get("evidence_refs", [])),
+    }
+    validated_payload = validate_judge_result_payload(coerced_payload)
     return validated_payload.model_dump(mode="json", exclude_none=True)

@@ -6,7 +6,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ooh.agent.contracts import judge_result_payload_json_schema, normalize_judge_result_payload
+from ooh.agent.contracts import judge_result_wire_json_schema, normalize_judge_result_payload
 from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, ModelResponse
 from ooh.agent.test_generation import extract_json_object
 
@@ -120,7 +120,9 @@ def build_answer_judging_request(
     return ModelRequest(
         model=model,
         response_format="json_object",
-        response_schema=judge_result_payload_json_schema(),
+        response_schema=judge_result_wire_json_schema(
+            evidence_source_uris=_evidence_source_uris(evidence_refs)
+        ),
         temperature=0,
         messages=[
             ModelMessage(
@@ -129,7 +131,8 @@ def build_answer_judging_request(
                     "You judge a developer's answer to a repository-understanding test. "
                     "Evaluate only against the generated test, rubric, expected answer, options, "
                     "and evidence refs provided. Return exactly one JSON object and no prose. "
-                    "Use status passing, needs_review, or getting_out_of_hand."
+                    "Use status passing, needs_review, or getting_out_of_hand. Return "
+                    "evidence_refs as a list of cited source_uri strings."
                 ),
             ),
             ModelMessage(
@@ -142,7 +145,10 @@ def build_answer_judging_request(
                 ),
             ),
         ],
-        metadata={"prompt_version": ANSWER_JUDGING_PROMPT_VERSION},
+        metadata={
+            "prompt_version": ANSWER_JUDGING_PROMPT_VERSION,
+            "call_action": "judge",
+        },
     )
 
 
@@ -158,7 +164,9 @@ def build_answer_judging_repair_request(
     return ModelRequest(
         model=model,
         response_format="json_object",
-        response_schema=judge_result_payload_json_schema(),
+        response_schema=judge_result_wire_json_schema(
+            evidence_source_uris=_evidence_source_uris(evidence_refs)
+        ),
         temperature=0,
         messages=[
             ModelMessage(
@@ -166,7 +174,8 @@ def build_answer_judging_repair_request(
                 content=(
                     "You repair answer-judging JSON. Return exactly one corrected JSON object "
                     "and no prose. The JSON must include score, status, feedback, "
-                    "missed_concepts, evidence_refs, and optional suggested_learning."
+                    "missed_concepts, evidence_refs as source_uri strings, and optional "
+                    "suggested_learning."
                 ),
             ),
             ModelMessage(
@@ -182,7 +191,11 @@ def build_answer_judging_repair_request(
                 ),
             ),
         ],
-        metadata={"prompt_version": ANSWER_JUDGING_PROMPT_VERSION, "repair": True},
+        metadata={
+            "prompt_version": ANSWER_JUDGING_PROMPT_VERSION,
+            "call_action": "repair",
+            "repair": True,
+        },
     )
 
 
@@ -199,4 +212,14 @@ def parse_answer_judging_payload(model_content: str) -> dict[str, Any]:
     try:
         return normalize_judge_result_payload(payload)
     except ValidationError as exc:
-        raise AnswerJudgingPayloadError("judge output did not match judge result contract") from exc
+        raise AnswerJudgingPayloadError(
+            f"judge output did not match judge result contract: {exc}"
+        ) from exc
+
+
+def _evidence_source_uris(evidence_refs: list[dict[str, Any]]) -> list[str]:
+    return [
+        source_uri
+        for evidence_ref in evidence_refs
+        if isinstance((source_uri := evidence_ref.get("source_uri")), str) and source_uri
+    ]

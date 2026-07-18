@@ -22,6 +22,12 @@ docker compose up --build
 Optionally copy `.env.example` to `.env` if you want to override ports, model names, or
 the read-only repository mount used by the worker.
 
+Test generation defaults to the available `qwen3:8b` Ollama model. The generation prompt is
+limited to 8,000 UTF-8 bytes, including instructions, repair feedback, and repository context;
+deterministic repo-tool observations are limited to 2,500 bytes inside that total. Override these
+with `OOH_GENERATION_PROMPT_MAX_BYTES` and `OOH_TOOL_OBSERVATION_MAX_BYTES` after increasing the
+model context window and confirming memory headroom.
+
 Default host-facing ports live in the `8500-8510` range to avoid common development ports:
 API/UI on `8500`, Postgres on `8501`, and the Vite dev server on `8502`.
 
@@ -138,9 +144,13 @@ The worker creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, record
 `docs/**`, and `adr/**`, records baseline and commit-to-commit drift events using the active
 attention profile if one exists, and marks the repository indexed at the resolved commit SHA.
 Generation jobs build bounded context-pack artifacts with prompt-safe code and guidance excerpts,
-call the configured local model through Ollama, validate schema and evidence refs, and persist
-generated tests plus agent traces. Judging jobs score submitted answers, persist result history,
-and save model-suggested learnings when returned.
+select one test type per context pack, call the configured local model through Ollama with that
+type's lean wire schema, validate the result against the stricter canonical Pydantic contract,
+enrich evidence refs, and persist generated tests plus agent traces. Canonical string and collection
+bounds remain application-side so Ollama's grammar compiler does not receive large repetition
+constraints. Schema enforcement failures fail the model call instead of falling back to
+unconstrained JSON. Judging jobs score submitted answers, persist result history, and save
+model-suggested learnings when returned.
 
 Local model calls default to a 300 second timeout. Override with
 `OOH_MODEL_TIMEOUT_SECONDS` in `.env` when running slower models or larger repositories.

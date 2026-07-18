@@ -254,9 +254,13 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
     provider = FakeProvider(
         json.dumps(
             {
-                "type": "short_answer",
+                "type": "mcq_single",
                 "question": "Which method uppercases the value?",
-                "expected_answer": "Service.handle uppercases the value.",
+                "options": [
+                    {"id": "A", "text": "Service.handle"},
+                    {"id": "B", "text": "Service.__init__"},
+                ],
+                "correct_option_ids": ["A"],
                 "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
             }
         )
@@ -276,6 +280,7 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
     result = service.generate_for_context_packs([context_pack], job_id=uuid4())
 
     assert result.agent_run.status == AgentStatus.SUCCEEDED
+    assert generated_test_repo.inputs[0].test_payload["type"] == "mcq_single"
     assert generated_test_repo.inputs[0].test_payload["evidence_refs"][0]["source_uri"] == (
         "code:src/app.py"
     )

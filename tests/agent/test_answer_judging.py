@@ -35,6 +35,10 @@ def test_build_answer_judging_request_asks_for_json() -> None:
     assert request.response_format == "json_object"
     assert request.response_schema is not None
     assert "needs_review" in json.dumps(request.response_schema)
+    assert "maxLength" not in json.dumps(request.response_schema)
+    assert request.response_schema["properties"]["evidence_refs"]["items"]["enum"] == [
+        "code:src/app.py"
+    ]
     assert request.metadata["prompt_version"] == "answer-judging-v1"
     assert "What matters?" in request.messages[1].content
     assert "Evidence matters." in request.messages[1].content
@@ -76,6 +80,28 @@ def test_parse_answer_judging_payload_normalizes_status() -> None:
         "feedback": "Good answer.",
         "evidence_refs": [],
     }
+
+
+def test_parse_answer_judging_payload_normalizes_wire_evidence_uris() -> None:
+    payload = parse_answer_judging_payload(
+        json.dumps(
+            {
+                "score": 1,
+                "status": "passing",
+                "feedback": "Grounded answer.",
+                "missed_concepts": [],
+                "evidence_refs": ["code:src/app.py"],
+            }
+        )
+    )
+
+    assert payload["evidence_refs"] == [
+        {
+            "source_type": "code",
+            "source_uri": "code:src/app.py",
+            "metadata": {},
+        }
+    ]
 
 
 def test_parse_answer_judging_payload_rejects_invalid_contract() -> None:

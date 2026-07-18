@@ -83,20 +83,101 @@ GeneratedTestPayload = Annotated[
     ShortAnswerTestPayload | McqSingleTestPayload | McqMultiTestPayload,
     Field(discriminator="type"),
 ]
+GeneratedTestType = Literal["short_answer", "mcq_single", "mcq_multi"]
+
+
+class _WireMcqOption(StrictPayloadModel):
+    id: str
+    text: str
+
+
+class _BaseGeneratedTestWirePayload(StrictPayloadModel):
+    question: str
+    evidence_refs: list[str]
+    explanation: str | None = None
+
+
+class _ShortAnswerWirePayload(_BaseGeneratedTestWirePayload):
+    type: Literal["short_answer"]
+    expected_answer: str
+
+
+class _McqSingleWirePayload(_BaseGeneratedTestWirePayload):
+    type: Literal["mcq_single"]
+    options: list[_WireMcqOption]
+    correct_option_ids: list[str]
+
+
+class _McqMultiWirePayload(_BaseGeneratedTestWirePayload):
+    type: Literal["mcq_multi"]
+    options: list[_WireMcqOption]
+    correct_option_ids: list[str]
 
 _generated_test_payload_adapter = TypeAdapter(GeneratedTestPayload)
+_generated_test_payload_adapters: dict[GeneratedTestType, TypeAdapter[Any]] = {
+    "short_answer": TypeAdapter(ShortAnswerTestPayload),
+    "mcq_single": TypeAdapter(McqSingleTestPayload),
+    "mcq_multi": TypeAdapter(McqMultiTestPayload),
+}
+_generated_test_wire_adapters: dict[GeneratedTestType, TypeAdapter[Any]] = {
+    "short_answer": TypeAdapter(_ShortAnswerWirePayload),
+    "mcq_single": TypeAdapter(_McqSingleWirePayload),
+    "mcq_multi": TypeAdapter(_McqMultiWirePayload),
+}
 
 
-def validate_generated_test_payload(payload: dict[str, Any]) -> GeneratedTestPayload:
-    return _generated_test_payload_adapter.validate_python(payload)
+def validate_generated_test_payload(
+    payload: dict[str, Any],
+    *,
+    expected_type: GeneratedTestType | None = None,
+) -> GeneratedTestPayload:
+    adapter = (
+        _generated_test_payload_adapter
+        if expected_type is None
+        else _generated_test_payload_adapters[expected_type]
+    )
+    return adapter.validate_python(payload)
 
 
-def generated_test_payload_json_schema() -> dict[str, Any]:
-    return _generated_test_payload_adapter.json_schema()
+def generated_test_payload_json_schema(
+    test_type: GeneratedTestType | None = None,
+) -> dict[str, Any]:
+    adapter = (
+        _generated_test_payload_adapter
+        if test_type is None
+        else _generated_test_payload_adapters[test_type]
+    )
+    return adapter.json_schema()
 
 
-def normalize_generated_test_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    validated_payload = validate_generated_test_payload(coerce_generated_test_payload(payload))
+def generated_test_wire_json_schema(
+    test_type: GeneratedTestType,
+    *,
+    evidence_source_uris: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return the small generation contract sent to a model provider.
+
+    Canonical length and collection bounds remain on the persisted payload models and
+    are enforced after generation. They are intentionally absent here because local
+    grammar compilers should only receive the shape the model must author.
+    """
+
+    schema = _generated_test_wire_adapters[test_type].json_schema()
+    source_uris = list(dict.fromkeys(evidence_source_uris or []))
+    if source_uris:
+        schema["properties"]["evidence_refs"]["items"]["enum"] = source_uris
+    return schema
+
+
+def normalize_generated_test_payload(
+    payload: dict[str, Any],
+    *,
+    expected_type: GeneratedTestType | None = None,
+) -> dict[str, Any]:
+    validated_payload = validate_generated_test_payload(
+        coerce_generated_test_payload(payload),
+        expected_type=expected_type,
+    )
     return validated_payload.model_dump(mode="json", exclude_none=True)
 
 

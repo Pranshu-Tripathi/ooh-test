@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from dataclasses import replace
+from time import monotonic
 from typing import Any
 from urllib import error, request
 
@@ -13,7 +15,7 @@ from ooh.agent.providers.base import (
 )
 
 Transport = Callable[[request.Request, float], bytes]
-SCHEMA_FORMAT_UNSUPPORTED_ERRORS = ("failed to load model vocabulary required for format",)
+logger = logging.getLogger(__name__)
 
 
 class OllamaModelProvider:
@@ -29,19 +31,98 @@ class OllamaModelProvider:
         self.transport = transport or urlopen_bytes
 
     def generate(self, model_request: ModelRequest) -> ModelResponse:
+        started_at = monotonic()
+        endpoint = f"{self.base_url}/api/chat"
+        output_mode = self._output_mode(model_request)
+        call_action = self._call_action(model_request)
+        prompt_char_count = sum(len(message.content) for message in model_request.messages)
+        prompt_byte_count = sum(
+            len(message.content.encode("utf-8")) for message in model_request.messages
+        )
+        logger.info(
+            "llm call started provider=ollama model=%s action=%s output_mode=%s "
+            "endpoint=%s timeout_seconds=%s prompt_version=%s test_type=%s "
+            "message_count=%s prompt_char_count=%s prompt_byte_count=%s "
+            "prompt_max_bytes=%s context_original_bytes=%s context_prompt_bytes=%s "
+            "context_truncated=%s",
+            model_request.model,
+            call_action,
+            output_mode,
+            endpoint,
+            f"{self.timeout_seconds:g}",
+            model_request.metadata.get("prompt_version"),
+            model_request.metadata.get("test_type"),
+            len(model_request.messages),
+            prompt_char_count,
+            prompt_byte_count,
+            model_request.metadata.get("prompt_max_bytes"),
+            model_request.metadata.get("context_original_bytes"),
+            model_request.metadata.get("context_prompt_bytes"),
+            model_request.metadata.get("context_truncated"),
+        )
         try:
-            return self._generate_once(model_request)
+            response = self._generate_once(model_request)
         except TimeoutError as exc:
-            raise ModelProviderError(
+            provider_error = ModelProviderError(
                 f"ollama request timed out after {self.timeout_seconds:g}s"
-            ) from exc
+            )
+            self._log_failed_call(
+                model_request,
+                call_action=call_action,
+                output_mode=output_mode,
+                started_at=started_at,
+                error_value=provider_error,
+            )
+            raise provider_error from exc
         except error.HTTPError as exc:
             detail = self._http_error_detail(exc)
-            if self._should_retry_without_schema(model_request, detail):
-                return self._retry_without_schema(model_request, detail)
-            raise ModelProviderError(f"ollama request failed: {exc.code} {detail}") from exc
+            provider_error = ModelProviderError(f"ollama request failed: {exc.code} {detail}")
+            self._log_failed_call(
+                model_request,
+                call_action=call_action,
+                output_mode=output_mode,
+                started_at=started_at,
+                error_value=provider_error,
+            )
+            raise provider_error from exc
         except error.URLError as exc:
-            raise ModelProviderError(f"ollama request failed: {exc.reason}") from exc
+            provider_error = ModelProviderError(f"ollama request failed: {exc.reason}")
+            self._log_failed_call(
+                model_request,
+                call_action=call_action,
+                output_mode=output_mode,
+                started_at=started_at,
+                error_value=provider_error,
+            )
+            raise provider_error from exc
+        except ModelProviderError as exc:
+            self._log_failed_call(
+                model_request,
+                call_action=call_action,
+                output_mode=output_mode,
+                started_at=started_at,
+                error_value=exc,
+            )
+            raise
+
+        duration_ms = round((monotonic() - started_at) * 1000)
+        response = self._response_with_provider_metadata(
+            response,
+            endpoint=endpoint,
+            output_mode=output_mode,
+            duration_ms=duration_ms,
+            timeout_seconds=self.timeout_seconds,
+        )
+        logger.info(
+            "llm call succeeded provider=ollama model=%s action=%s output_mode=%s "
+            "duration_ms=%s finish_reason=%s",
+            response.model,
+            call_action,
+            output_mode,
+            duration_ms,
+            response.finish_reason,
+        )
+        return response
 
     def _generate_once(self, model_request: ModelRequest) -> ModelResponse:
         payload = self._payload(model_request)
@@ -77,21 +158,6 @@ class OllamaModelProvider:
             finish_reason=finish_reason,
         )
 
-    def _retry_without_schema(self, model_request: ModelRequest, fallback_reason: str) -> ModelResponse:
-        fallback_request = replace(model_request, response_schema=None)
-        try:
-            response = self._generate_once(fallback_request)
-        except TimeoutError as exc:
-            raise ModelProviderError(
-                f"ollama request timed out after {self.timeout_seconds:g}s"
-            ) from exc
-        except error.HTTPError as exc:
-            detail = self._http_error_detail(exc)
-            raise ModelProviderError(f"ollama request failed: {exc.code} {detail}") from exc
-        except error.URLError as exc:
-            raise ModelProviderError(f"ollama request failed: {exc.reason}") from exc
-        return self._response_with_schema_fallback_metadata(response, fallback_reason)
-
     @staticmethod
     def _payload(model_request: ModelRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -111,19 +177,17 @@ class OllamaModelProvider:
         return payload
 
     @staticmethod
-    def _should_retry_without_schema(model_request: ModelRequest, detail: str) -> bool:
-        return model_request.response_schema is not None and any(
-            message in detail for message in SCHEMA_FORMAT_UNSUPPORTED_ERRORS
-        )
-
-    @staticmethod
     def _http_error_detail(exc: error.HTTPError) -> str:
         return exc.read().decode("utf-8", errors="replace")
 
     @staticmethod
-    def _response_with_schema_fallback_metadata(
+    def _response_with_provider_metadata(
         response: ModelResponse,
-        fallback_reason: str,
+        *,
+        endpoint: str,
+        output_mode: str,
+        duration_ms: int,
+        timeout_seconds: float,
     ) -> ModelResponse:
         raw_response = dict(response.raw_response)
         provider_metadata = raw_response.get("_ooh")
@@ -131,11 +195,49 @@ class OllamaModelProvider:
             provider_metadata = {}
         raw_response["_ooh"] = {
             **provider_metadata,
-            "structured_output_fallback": True,
-            "fallback_reason": fallback_reason,
-            "fallback_response_format": "json_object",
+            "provider": "ollama",
+            "endpoint": endpoint,
+            "output_mode": output_mode,
+            "schema_enforced": output_mode == "json_schema",
+            "duration_ms": duration_ms,
+            "timeout_seconds": timeout_seconds,
         }
         return replace(response, raw_response=raw_response)
+
+    @staticmethod
+    def _output_mode(model_request: ModelRequest) -> str:
+        if model_request.response_schema is not None:
+            return "json_schema"
+        if model_request.response_format == "json_object":
+            return "json"
+        return "text"
+
+    @staticmethod
+    def _call_action(model_request: ModelRequest) -> str:
+        call_action = model_request.metadata.get("call_action")
+        if isinstance(call_action, str) and call_action:
+            return call_action
+        return "generate"
+
+    @staticmethod
+    def _log_failed_call(
+        model_request: ModelRequest,
+        *,
+        call_action: str,
+        output_mode: str,
+        started_at: float,
+        error_value: Exception,
+    ) -> None:
+        logger.error(
+            "llm call failed provider=ollama model=%s action=%s output_mode=%s "
+            "duration_ms=%s error_type=%s error=%s",
+            model_request.model,
+            call_action,
+            output_mode,
+            round((monotonic() - started_at) * 1000),
+            type(error_value).__name__,
+            str(error_value),
+        )
 
     @staticmethod
     def _response_payload(response_bytes: bytes) -> dict[str, Any]:

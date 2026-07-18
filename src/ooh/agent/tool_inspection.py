@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from ooh.agent.prompt_budget import (
+    DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    compact_tool_observation,
+)
 from ooh.agent.tools import ToolExecution
 
 MAX_INSPECT_CODE_PATHS = 3
@@ -70,8 +74,9 @@ def inspection_prompt_payload(
     planned_calls: list[PlannedToolCall],
     executions: list[ToolExecution],
     failed_calls: list[FailedToolCall],
+    max_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "schema_version": 1,
         "planned_call_count": len(planned_calls),
         "completed_call_count": len(executions),
@@ -98,6 +103,7 @@ def inspection_prompt_payload(
             for failed_call in failed_calls
         ],
     }
+    return compact_tool_observation(payload, max_bytes=max_bytes)
 
 
 def context_pack_with_tool_inspection(

@@ -101,6 +101,8 @@ def build_test_generation_service(
             artifact_store=artifact_store,
             agent_trace_repo=agent_trace_repo,
             generated_test_repo=generated_test_repo,
+            max_prompt_bytes=settings.generation_prompt_max_bytes,
+            max_tool_observation_bytes=settings.tool_observation_max_bytes,
         )
 
     return TestGenerationService(
