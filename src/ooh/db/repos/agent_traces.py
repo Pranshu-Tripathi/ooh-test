@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from ooh.db.connection import Database
 from ooh.db.models import (
+    AgentActivity,
     AgentArtifact,
     AgentArtifactRead,
     AgentArtifactType,
@@ -17,6 +18,7 @@ from ooh.db.models import (
     AgentStep,
     AgentStepRead,
     AgentStepType,
+    ContextPack,
     ProvenanceRef,
     ProvenanceRefRead,
     ProvenanceRefType,
@@ -37,7 +39,11 @@ class AgentStepInput:
     agent_run_id: UUID
     step_type: AgentStepType
     sequence: int
+    parent_step_id: UUID | None = None
+    context_pack_id: UUID | None = None
+    iteration: int | None = None
     status: AgentStatus = AgentStatus.QUEUED
+    activity: AgentActivity | None = None
     input_summary: dict[str, Any] = field(default_factory=dict)
     output_summary: dict[str, Any] = field(default_factory=dict)
     warning_summary: list[dict[str, Any]] = field(default_factory=list)
@@ -126,11 +132,49 @@ class AgentTraceRepo:
 
     def create_step(self, input: AgentStepInput) -> AgentStepRead:
         with self.db.session() as session:
+            if input.iteration is not None and input.iteration < 1:
+                raise ValueError("agent step iteration must be positive")
+
+            parent_step = None
+            context_pack_id = input.context_pack_id
+            if input.parent_step_id is not None:
+                parent_step = session.get(AgentStep, input.parent_step_id)
+                if parent_step is None:
+                    raise ValueError("parent agent step not found")
+                if parent_step.agent_run_id != input.agent_run_id:
+                    raise ValueError("parent agent step must belong to the same agent run")
+                if context_pack_id is None:
+                    context_pack_id = parent_step.context_pack_id
+
+            if context_pack_id is not None:
+                context_pack = session.get(ContextPack, context_pack_id)
+                if context_pack is None:
+                    raise ValueError("context pack not found")
+                if parent_step is not None and (
+                    parent_step.context_pack_id is not None
+                    and parent_step.context_pack_id != context_pack_id
+                ):
+                    raise ValueError("child and parent agent steps must use the same context pack")
+                agent_run = session.get(AgentRun, input.agent_run_id)
+                if agent_run is None:
+                    raise ValueError("agent run not found")
+                if (
+                    agent_run.repository_id is not None
+                    and context_pack.repository_id != agent_run.repository_id
+                ):
+                    raise ValueError(
+                        "context pack and agent run must belong to the same repository"
+                    )
+
             step = AgentStep(
                 agent_run_id=input.agent_run_id,
+                parent_step_id=input.parent_step_id,
+                context_pack_id=context_pack_id,
                 step_type=input.step_type,
                 status=input.status,
+                activity=input.activity,
                 sequence=input.sequence,
+                iteration=input.iteration,
                 input_summary=input.input_summary,
                 output_summary=input.output_summary,
                 warning_summary=input.warning_summary,
@@ -156,13 +200,39 @@ class AgentTraceRepo:
                 return None
             return AgentStepRead.model_validate(step)
 
-    def mark_step_running(self, step_id: UUID) -> AgentStepRead:
+    def mark_step_running(
+        self,
+        step_id: UUID,
+        *,
+        activity: AgentActivity | None = None,
+    ) -> AgentStepRead:
         with self.db.session() as session:
             step = session.get(AgentStep, step_id)
             if step is None:
                 raise ValueError("agent step not found")
 
             step.status = AgentStatus.RUNNING
+            step.activity = activity
+            step.started_at = step.started_at or datetime.now(UTC)
+            session.flush()
+            session.refresh(step)
+            return AgentStepRead.model_validate(step)
+
+    def mark_step_activity(
+        self,
+        step_id: UUID,
+        *,
+        activity: AgentActivity,
+    ) -> AgentStepRead:
+        with self.db.session() as session:
+            step = session.get(AgentStep, step_id)
+            if step is None:
+                raise ValueError("agent step not found")
+            if step.finished_at is not None:
+                raise ValueError("cannot change activity for a finished agent step")
+
+            step.status = AgentStatus.RUNNING
+            step.activity = activity
             step.started_at = step.started_at or datetime.now(UTC)
             session.flush()
             session.refresh(step)
@@ -182,6 +252,7 @@ class AgentTraceRepo:
                 raise ValueError("agent step not found")
 
             step.status = status
+            step.activity = None
             if output_summary is not None:
                 step.output_summary = output_summary
             if warning_summary is not None:

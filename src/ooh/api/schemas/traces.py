@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from ooh.db.models import (
+    AgentActivity,
     AgentArtifactRead,
     AgentArtifactType,
     AgentRunRead,
@@ -12,6 +13,8 @@ from ooh.db.models import (
     AgentStatus,
     AgentStepRead,
     AgentStepType,
+    ExecutionEventRead,
+    ExecutionEventType,
     ProvenanceRefRead,
     ProvenanceRefType,
 )
@@ -46,9 +49,13 @@ class AgentRunResponse(BaseModel):
 class AgentStepResponse(BaseModel):
     id: UUID
     agent_run_id: UUID
+    parent_step_id: UUID | None
+    context_pack_id: UUID | None
     step_type: AgentStepType
     status: AgentStatus
+    activity: AgentActivity | None
     sequence: int
+    iteration: int | None
     input_summary: dict[str, Any]
     output_summary: dict[str, Any]
     warning_summary: list[dict[str, Any]]
@@ -61,15 +68,43 @@ class AgentStepResponse(BaseModel):
         return cls(
             id=step.id,
             agent_run_id=step.agent_run_id,
+            parent_step_id=step.parent_step_id,
+            context_pack_id=step.context_pack_id,
             step_type=step.step_type,
             status=step.status,
+            activity=step.activity,
             sequence=step.sequence,
+            iteration=step.iteration,
             input_summary=step.input_summary,
             output_summary=step.output_summary,
             warning_summary=step.warning_summary,
             started_at=step.started_at,
             finished_at=step.finished_at,
             created_at=step.created_at,
+        )
+
+
+class ExecutionEventResponse(BaseModel):
+    id: int
+    repository_id: UUID | None
+    job_id: UUID | None
+    agent_run_id: UUID | None
+    agent_step_id: UUID | None
+    event_type: ExecutionEventType
+    payload: dict[str, Any]
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, event: ExecutionEventRead) -> "ExecutionEventResponse":
+        return cls(
+            id=event.id,
+            repository_id=event.repository_id,
+            job_id=event.job_id,
+            agent_run_id=event.agent_run_id,
+            agent_step_id=event.agent_step_id,
+            event_type=event.event_type,
+            payload=event.payload,
+            created_at=event.created_at,
         )
 
 
