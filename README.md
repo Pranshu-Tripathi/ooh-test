@@ -2,7 +2,7 @@
 
 Out Of Hands Test is a local-first developer tool for keeping humans in command of fast-moving codebases.
 
-Phase 1 starts with a Docker Compose MVP:
+The Phase 2 development runtime uses Docker Compose with:
 
 - FastAPI API service
 - background worker service
@@ -24,7 +24,7 @@ the read-only repository mount used by the worker.
 
 Test generation defaults to the available `qwen3:8b` Ollama model. The generation prompt is
 limited to 8,000 UTF-8 bytes, including instructions, repair feedback, and repository context;
-deterministic repo-tool observations are limited to 2,500 bytes inside that total. Override these
+model-directed repo-tool observations are limited to 2,500 bytes inside that total. Override these
 with `OOH_GENERATION_PROMPT_MAX_BYTES` and `OOH_TOOL_OBSERVATION_MAX_BYTES` after increasing the
 model context window and confirming memory headroom.
 
@@ -143,19 +143,23 @@ The worker creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, record
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
 `docs/**`, and `adr/**`, records baseline and commit-to-commit drift events using the active
 attention profile if one exists, and marks the repository indexed at the resolved commit SHA.
-Generation jobs build bounded context-pack artifacts with prompt-safe code and guidance excerpts,
-select one test type per context pack, call the configured local model through Ollama with that
-type's lean wire schema, validate the result against the stricter canonical Pydantic contract,
-enrich evidence refs, and persist generated tests plus agent traces. Canonical string and collection
-bounds remain application-side so Ollama's grammar compiler does not receive large repetition
-constraints. Schema enforcement failures fail the model call instead of falling back to
-unconstrained JSON. Judging jobs score submitted answers, persist result history, and save
-model-suggested learnings when returned.
+Generation jobs build bounded context-pack artifacts with prompt-safe code and guidance excerpts.
+For indexed snapshots, the model can inspect the repository through native Ollama tool calls backed
+by the immutable tree-sitter index. Novel calls are not count-limited; identical calls are rejected,
+tool path and byte boundaries remain application-controlled, and every executed call is traced. The
+same ten-minute deadline covers inspection and final generation for a context pack. Final generation
+uses the selected test type's lean wire schema, validates the result against the stricter canonical
+Pydantic contract, enriches evidence refs, and persists the generated test plus its agent trace.
+Schema enforcement failures fail the model call instead of falling back to unconstrained JSON.
+Judging jobs score submitted answers, persist result history, and save model-suggested learnings when
+returned.
 
 Local model calls default to a 300 second timeout. Override with
 `OOH_MODEL_TIMEOUT_SECONDS` in `.env` when running slower models or larger repositories.
+The shared inspection and generation deadline defaults to 600 seconds and can be changed with
+`OOH_AGENT_LOOP_TIMEOUT_SECONDS`.
 
-Phase 1 is being implemented in reviewable components.
+Phase 2 is being implemented in reviewable components.
 
 ## Migrations
 

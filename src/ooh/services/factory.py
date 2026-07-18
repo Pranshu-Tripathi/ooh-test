@@ -103,6 +103,7 @@ def build_test_generation_service(
             generated_test_repo=generated_test_repo,
             max_prompt_bytes=settings.generation_prompt_max_bytes,
             max_tool_observation_bytes=settings.tool_observation_max_bytes,
+            max_loop_duration_seconds=settings.agent_loop_timeout_seconds,
         )
 
     return TestGenerationService(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -12,6 +12,7 @@ from ooh.agent.contracts import (
     normalize_generated_test_payload,
 )
 from ooh.agent.evidence import EvidenceVerificationResult, verify_generated_test_evidence
+from ooh.agent.loop_runtime import LoopDeadline
 from ooh.agent.prompt_budget import (
     DEFAULT_GENERATION_PROMPT_MAX_BYTES,
     DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
@@ -106,7 +107,12 @@ class GeneratedTestAgentLoop:
         self.max_prompt_bytes = max_prompt_bytes
         self.max_tool_observation_bytes = max_tool_observation_bytes
 
-    def run(self, context_pack: dict[str, Any]) -> GeneratedTestLoopResult:
+    def run(
+        self,
+        context_pack: dict[str, Any],
+        *,
+        deadline: LoopDeadline | None = None,
+    ) -> GeneratedTestLoopResult:
         turns: list[GeneratedTestLoopTurn] = []
         test_type = select_generated_test_type(context_pack)
         request = build_test_generation_request(
@@ -123,7 +129,14 @@ class GeneratedTestAgentLoop:
 
         while True:
             sequence += 1
+            if deadline is not None:
+                request = replace(
+                    request,
+                    timeout_seconds=deadline.remaining_seconds(action="calling the test model"),
+                )
             response = self.provider.generate(request)
+            if deadline is not None:
+                deadline.remaining_seconds(action="validating the test model response")
             try:
                 payload = parse_generated_test_payload(
                     response.content,

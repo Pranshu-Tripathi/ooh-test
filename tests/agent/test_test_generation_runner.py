@@ -7,7 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from ooh.agent import AgentArtifactStore, GeneratedTestRunService
-from ooh.agent.providers import ModelRequest, ModelResponse
+from ooh.agent.providers import ModelRequest, ModelResponse, ModelToolCall
 from ooh.db.models import (
     AgentArtifactRead,
     AgentArtifactType,
@@ -39,18 +39,20 @@ from ooh.worker.repository_inspector import LocalRepositoryInspector
 
 
 class FakeProvider:
-    def __init__(self, content: str | list[str]) -> None:
-        self.contents = [content] if isinstance(content, str) else content
+    def __init__(self, response: str | ModelResponse | list[str | ModelResponse]) -> None:
+        self.responses = response if isinstance(response, list) else [response]
         self.requests: list[ModelRequest] = []
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         self.requests.append(request)
-        index = min(len(self.requests) - 1, len(self.contents) - 1)
-        content = self.contents[index]
+        index = min(len(self.requests) - 1, len(self.responses) - 1)
+        response = self.responses[index]
+        if isinstance(response, ModelResponse):
+            return response
         return ModelResponse(
             model=request.model,
-            content=content,
-            raw_response={"message": {"content": content}},
+            content=response,
+            raw_response={"message": {"content": response}},
             finish_reason="stop",
         )
 
@@ -252,18 +254,47 @@ def test_generated_test_run_service_persists_tests_and_trace_artifacts(tmp_path)
 
 def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_path: Path) -> None:
     provider = FakeProvider(
-        json.dumps(
-            {
-                "type": "mcq_single",
-                "question": "Which method uppercases the value?",
-                "options": [
-                    {"id": "A", "text": "Service.handle"},
-                    {"id": "B", "text": "Service.__init__"},
+        [
+            ModelResponse(
+                model="qwen3-coder:8b",
+                content="",
+                raw_response={"message": {"content": ""}},
+                finish_reason="stop",
+                tool_calls=[
+                    ModelToolCall(name="repo.list_files", arguments={}, call_id="files-1"),
+                    ModelToolCall(
+                        name="repo.list_symbols",
+                        arguments={"path": "src/app.py"},
+                        call_id="symbols-1",
+                    ),
+                    ModelToolCall(
+                        name="repo.read_symbol",
+                        arguments={"qualified_name": "Service.handle"},
+                        call_id="read-1",
+                    ),
                 ],
-                "correct_option_ids": ["A"],
-                "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
-            }
-        )
+            ),
+            ModelResponse(
+                model="qwen3-coder:8b",
+                content="Inspection complete.",
+                raw_response={"message": {"content": "Inspection complete."}},
+                finish_reason="stop",
+            ),
+            json.dumps(
+                {
+                    "type": "mcq_single",
+                    "question": "Which method uppercases the value?",
+                    "options": [
+                        {"id": "A", "text": "Service.handle"},
+                        {"id": "B", "text": "Service.__init__"},
+                    ],
+                    "correct_option_ids": ["A"],
+                    "evidence_refs": [
+                        {"source_type": "code", "source_uri": "code:src/app.py"}
+                    ],
+                }
+            ),
+        ]
     )
     trace_repo = FakeAgentTraceRepo()
     generated_test_repo = FakeGeneratedTestRepo()
@@ -287,6 +318,7 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
 
     steps_by_sequence = sorted(trace_repo.steps.values(), key=lambda step: step.sequence)
     assert [step.step_type for step in steps_by_sequence] == [
+        AgentStepType.BUILD_TEST_PLAN,
         AgentStepType.TOOL_CALL,
         AgentStepType.TOOL_CALL,
         AgentStepType.TOOL_CALL,
@@ -298,15 +330,30 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
     assert [step.input_summary["tool_name"] for step in tool_steps] == [
         "repo.list_files",
         "repo.list_symbols",
-        "repo.read_file_range",
+        "repo.read_symbol",
     ]
+    plan_step = steps_by_sequence[0]
+    assert plan_step.output_summary == {
+        "completion_reason": "model_finished",
+        "model_turn_count": 2,
+        "completed_tool_call_count": 3,
+        "failed_tool_call_count": 0,
+        "duplicate_tool_call_count": 0,
+    }
 
     artifact_types = [artifact.artifact_type for artifact in trace_repo.artifacts]
     assert artifact_types.count(AgentArtifactType.TOOL_CALL_RESULT) == 3
-    assert AgentArtifactType.PROMPT in artifact_types
+    assert artifact_types.count(AgentArtifactType.PROMPT) == 3
+    assert artifact_types.count(AgentArtifactType.RAW_MODEL_RESPONSE) == 3
     assert ProvenanceRefType.CODE in [ref.ref_type for ref in trace_repo.provenance_refs]
 
-    prompt = provider.requests[0].messages[1].content
+    assert len(provider.requests) == 3
+    assert provider.requests[0].tools
+    assert provider.requests[0].response_schema is None
+    assert provider.requests[1].tools
+    assert provider.requests[2].tools == []
+    assert provider.requests[2].response_schema is not None
+    prompt = provider.requests[2].messages[1].content
     assert "tool_inspection" in prompt
     assert "Service.handle" in prompt
     assert "return value.upper()" in prompt

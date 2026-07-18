@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     answer_judge_model: str = "deepseek-r1:8b"
     generation_prompt_max_bytes: int = Field(default=8_000, ge=4_000)
     tool_observation_max_bytes: int = Field(default=2_500, ge=500)
+    agent_loop_timeout_seconds: float = Field(default=600, gt=0)
 
 
 @lru_cache

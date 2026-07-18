@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from ooh.agent.loop_runtime import AgentLoopDeadlineExceeded, LoopDeadline
 from ooh.agent.providers import ModelRequest, ModelResponse
 from ooh.agent.test_generation import (
     GeneratedTestAgentLoop,
@@ -291,6 +292,21 @@ def test_agent_loop_repairs_invalid_payload() -> None:
     assert result.turns[1].validation_error is None
     assert provider.requests[1].metadata["repair"] is True
     assert "expected_answer" in provider.requests[1].messages[1].content
+
+
+def test_agent_loop_enforces_shared_deadline_after_model_call() -> None:
+    clock_value = [0.0]
+
+    class SlowProvider:
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            clock_value[0] = 11
+            return ModelResponse(model=request.model, content="{}", raw_response={"ok": True})
+
+    deadline = LoopDeadline.start(10, clock=lambda: clock_value[0])
+    loop = GeneratedTestAgentLoop(SlowProvider(), model="qwen3:8b")
+
+    with pytest.raises(AgentLoopDeadlineExceeded, match="validating the test model response"):
+        loop.run({"pack_type": "active_pr"}, deadline=deadline)
 
 
 def test_agent_loop_fails_after_repair_budget() -> None:

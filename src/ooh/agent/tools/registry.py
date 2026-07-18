@@ -45,6 +45,10 @@ class ToolRegistry:
             for tool in sorted(self._tools_by_name.values(), key=lambda item: item.name)
         ]
 
+    def canonical_arguments(self, name: str, raw_args: dict[str, Any]) -> dict[str, Any]:
+        validated = self.get(name).validate_args(raw_args)
+        return validated.model_dump(mode="json")
+
 
 def default_tool_registry() -> ToolRegistry:
     return ToolRegistry(

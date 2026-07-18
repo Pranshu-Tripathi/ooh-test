@@ -8,19 +8,19 @@ from typing import Any
 from uuid import UUID
 
 from ooh.agent.artifacts import AgentArtifactStore
+from ooh.agent.loop_runtime import DEFAULT_AGENT_LOOP_TIMEOUT_SECONDS, LoopDeadline
 from ooh.agent.providers import ModelProvider
 from ooh.agent.prompt_budget import (
     DEFAULT_GENERATION_PROMPT_MAX_BYTES,
     DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
 )
-from ooh.agent.tool_inspection import (
-    FailedToolCall,
-    build_inspection_plan,
-    context_pack_with_tool_inspection,
-    inspection_prompt_payload,
-    snapshot_id,
-    snapshot_index_uri,
+from ooh.agent.repository_inspection import (
+    INSPECTION_PROMPT_VERSION,
+    ModelDirectedRepositoryInspector,
+    RepositoryInspectionResult,
+    RepositoryInspectionTurn,
 )
+from ooh.agent.tool_inspection import context_pack_with_tool_inspection, snapshot_id, snapshot_index_uri
 from ooh.agent.test_generation import (
     GeneratedTestAgentLoop,
     GeneratedTestEvidenceError,
@@ -29,9 +29,7 @@ from ooh.agent.test_generation import (
 )
 from ooh.agent.tools import (
     AgentTraceToolRecorder,
-    RepoToolError,
     RepositoryToolContext,
-    ToolExecution,
     ToolExecutor,
 )
 from ooh.db.models import (
@@ -67,10 +65,11 @@ class GeneratedTestRunResult:
     generated_tests: list[GeneratedTestRead]
 
 
-GENERATION_STEP_SEQUENCE = 10_000
-PERSIST_STEP_SEQUENCE = 20_000
-TOOL_CALL_SEQUENCE_BASE = 100
-TOOL_CALL_SEQUENCE_PACK_STRIDE = 1_000
+PLAN_STEP_SEQUENCE_BASE = 10
+TOOL_CALL_SEQUENCE_BASE = 1_000
+CONTEXT_PACK_SEQUENCE_STRIDE = 1_000_000
+GENERATION_STEP_SEQUENCE = 10_000_000
+PERSIST_STEP_SEQUENCE = 20_000_000
 
 
 class GeneratedTestRunService:
@@ -84,13 +83,16 @@ class GeneratedTestRunService:
         generated_test_repo: GeneratedTestRepo,
         max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
         max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+        max_loop_duration_seconds: float = DEFAULT_AGENT_LOOP_TIMEOUT_SECONDS,
     ) -> None:
         self.provider = provider
         self.model = model
         self.artifact_store = artifact_store
         self.agent_trace_repo = agent_trace_repo
         self.generated_test_repo = generated_test_repo
+        self.max_prompt_bytes = max_prompt_bytes
         self.max_tool_observation_bytes = max_tool_observation_bytes
+        self.max_loop_duration_seconds = max_loop_duration_seconds
         self.agent_loop = GeneratedTestAgentLoop(
             provider,
             model=model,
@@ -102,6 +104,13 @@ class GeneratedTestRunService:
                 agent_trace_repo=agent_trace_repo,
                 artifact_store=artifact_store,
             )
+        )
+        self.repository_inspector = ModelDirectedRepositoryInspector(
+            provider=provider,
+            model=model,
+            tool_executor=self.tool_executor,
+            max_prompt_bytes=max_prompt_bytes,
+            max_tool_observation_bytes=max_tool_observation_bytes,
         )
 
     def generate_for_context_packs(
@@ -216,14 +225,17 @@ class GeneratedTestRunService:
         *,
         context_pack_index: int,
     ) -> GeneratedTestInput:
+        deadline = LoopDeadline.start(self.max_loop_duration_seconds)
         context_pack_payload = self._read_context_pack(context_pack.context_pack.artifact_uri)
         context_pack_payload = self._inspect_context_pack(
             agent_run_id=agent_run_id,
+            context_pack_id=context_pack.context_pack.id,
             context_pack_payload=context_pack_payload,
             context_pack_index=context_pack_index,
+            deadline=deadline,
         )
         try:
-            loop_result = self.agent_loop.run(context_pack_payload)
+            loop_result = self.agent_loop.run(context_pack_payload, deadline=deadline)
         except (GeneratedTestPayloadError, GeneratedTestEvidenceError) as exc:
             if exc.turns:
                 self._write_turn_artifacts(
@@ -531,59 +543,191 @@ class GeneratedTestRunService:
         self,
         *,
         agent_run_id: UUID,
+        context_pack_id: UUID,
         context_pack_payload: dict[str, Any],
         context_pack_index: int,
+        deadline: LoopDeadline,
     ) -> dict[str, Any]:
         index_uri = snapshot_index_uri(context_pack_payload)
         if index_uri is None:
-            return context_pack_payload
-
-        planned_calls = build_inspection_plan(context_pack_payload)
-        if not planned_calls:
             return context_pack_payload
 
         tool_context = RepositoryToolContext.from_index_uri(
             index_uri,
             snapshot_id=snapshot_id(context_pack_payload),
         )
-        executions: list[ToolExecution] = []
-        failed_calls: list[FailedToolCall] = []
-        sequence_base = TOOL_CALL_SEQUENCE_BASE + (
-            context_pack_index * TOOL_CALL_SEQUENCE_PACK_STRIDE
+        sequence_base = context_pack_index * CONTEXT_PACK_SEQUENCE_STRIDE
+        plan_step = self._create_inspection_plan_step(
+            agent_run_id=agent_run_id,
+            context_pack_id=context_pack_id,
+            context_pack_payload=context_pack_payload,
+            sequence=sequence_base + PLAN_STEP_SEQUENCE_BASE,
         )
-
-        for call_index, planned_call in enumerate(planned_calls):
-            try:
-                execution = self.tool_executor.execute(
-                    tool_name=planned_call.tool_name,
-                    context=tool_context,
-                    arguments=planned_call.arguments,
+        try:
+            result = self.repository_inspector.run(
+                context_pack=context_pack_payload,
+                tool_context=tool_context,
+                deadline=deadline,
+                agent_run_id=agent_run_id,
+                tool_sequence_base=sequence_base + TOOL_CALL_SEQUENCE_BASE,
+                on_turn=lambda turn: self._write_inspection_turn_artifacts(
                     agent_run_id=agent_run_id,
-                    sequence=sequence_base + call_index,
-                    call_id=planned_call.call_id,
-                )
-            except RepoToolError as exc:
-                failed_calls.append(
-                    FailedToolCall(
-                        call_id=planned_call.call_id,
-                        tool_name=planned_call.tool_name,
-                        arguments=planned_call.arguments,
-                        error_type=type(exc).__name__,
-                        error=str(exc),
-                    )
-                )
-                continue
-            executions.append(execution)
+                    plan_step_id=plan_step.id,
+                    context_pack_id=context_pack_id,
+                    turn=turn,
+                ),
+            )
+        except Exception as exc:
+            self.agent_trace_repo.mark_step_finished(
+                plan_step.id,
+                status=AgentStatus.FAILED,
+                warning_summary=[{"error_type": type(exc).__name__, "error": str(exc)}],
+            )
+            raise
 
+        self.agent_trace_repo.mark_step_finished(
+            plan_step.id,
+            status=AgentStatus.SUCCEEDED,
+            output_summary=self._inspection_output_summary(result),
+            warning_summary=self._inspection_warnings(result),
+        )
         return context_pack_with_tool_inspection(
             context_pack_payload,
-            inspection_prompt_payload(
-                planned_calls=planned_calls,
-                executions=executions,
-                failed_calls=failed_calls,
-                max_bytes=self.max_tool_observation_bytes,
-            ),
+            result.prompt_payload(max_bytes=self.max_tool_observation_bytes),
         )
+
+    def _create_inspection_plan_step(
+        self,
+        *,
+        agent_run_id: UUID,
+        context_pack_id: UUID,
+        context_pack_payload: dict[str, Any],
+        sequence: int,
+    ) -> AgentStepRead:
+        step = self.agent_trace_repo.create_step(
+            AgentStepInput(
+                agent_run_id=agent_run_id,
+                step_type=AgentStepType.BUILD_TEST_PLAN,
+                sequence=sequence,
+                input_summary={
+                    "context_pack_id": str(context_pack_id),
+                    "pack_type": context_pack_payload.get("pack_type"),
+                    "model": self.model,
+                    "prompt_version": INSPECTION_PROMPT_VERSION,
+                    "max_duration_seconds": self.max_loop_duration_seconds,
+                },
+            )
+        )
+        return self.agent_trace_repo.mark_step_running(step.id)
+
+    def _write_inspection_turn_artifacts(
+        self,
+        *,
+        agent_run_id: UUID,
+        plan_step_id: UUID,
+        context_pack_id: UUID,
+        turn: RepositoryInspectionTurn,
+    ) -> None:
+        prompt = self.artifact_store.write_json(
+            agent_run_id=agent_run_id,
+            file_name=f"{context_pack_id}-inspection-turn-{turn.sequence}-prompt.json",
+            payload={
+                "model": turn.request.model,
+                "messages": [
+                    {
+                        "role": message.role,
+                        "content": message.content,
+                        "tool_name": message.tool_name,
+                        "tool_calls": [
+                            {
+                                "call_id": tool_call.call_id,
+                                "name": tool_call.name,
+                                "arguments": tool_call.arguments,
+                            }
+                            for tool_call in message.tool_calls
+                        ],
+                    }
+                    for message in turn.request.messages
+                ],
+                "tools": [
+                    {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    }
+                    for tool in turn.request.tools
+                ],
+                "timeout_seconds": turn.request.timeout_seconds,
+                "metadata": turn.request.metadata,
+            },
+        )
+        self.agent_trace_repo.create_artifact(
+            AgentArtifactInput(
+                agent_step_id=plan_step_id,
+                artifact_type=AgentArtifactType.PROMPT,
+                artifact_uri=prompt.artifact_uri,
+                content_hash=prompt.content_hash,
+            )
+        )
+
+        raw_response = self.artifact_store.write_json(
+            agent_run_id=agent_run_id,
+            file_name=f"{context_pack_id}-inspection-turn-{turn.sequence}-raw-response.json",
+            payload={
+                "model": turn.model_response.model,
+                "content": turn.model_response.content,
+                "finish_reason": turn.model_response.finish_reason,
+                "tool_calls": [
+                    {
+                        "call_id": tool_call.call_id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }
+                    for tool_call in turn.model_response.tool_calls
+                ],
+                "raw_response": turn.model_response.raw_response,
+            },
+        )
+        self.agent_trace_repo.create_artifact(
+            AgentArtifactInput(
+                agent_step_id=plan_step_id,
+                artifact_type=AgentArtifactType.RAW_MODEL_RESPONSE,
+                artifact_uri=raw_response.artifact_uri,
+                content_hash=raw_response.content_hash,
+            )
+        )
+
+    @staticmethod
+    def _inspection_output_summary(result: RepositoryInspectionResult) -> dict[str, Any]:
+        return {
+            "completion_reason": result.completion_reason,
+            "model_turn_count": len(result.turns),
+            "completed_tool_call_count": len(result.executions),
+            "failed_tool_call_count": len(result.failed_calls),
+            "duplicate_tool_call_count": len(result.duplicate_calls),
+        }
+
+    @staticmethod
+    def _inspection_warnings(result: RepositoryInspectionResult) -> list[dict[str, Any]]:
+        warnings = [
+            {
+                "type": "tool_call_failed",
+                "call_id": failed.call_id,
+                "tool_name": failed.tool_name,
+                "error": failed.error,
+            }
+            for failed in result.failed_calls
+        ]
+        warnings.extend(
+            {
+                "type": "duplicate_tool_call_rejected",
+                "call_id": duplicate.call_id,
+                "tool_name": duplicate.tool_name,
+                "arguments": duplicate.arguments,
+            }
+            for duplicate in result.duplicate_calls
+        )
+        return warnings
 
     @staticmethod
     def _read_context_pack(artifact_uri: str) -> dict[str, Any]:

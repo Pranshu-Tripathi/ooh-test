@@ -663,15 +663,15 @@ function TraceGraph({
     (count, artifacts) => count + artifacts.length,
     0
   );
-  const modelArtifactCount = Object.values(artifactsByStepId)
+  const modelCallCount = Object.values(artifactsByStepId)
     .flat()
-    .filter((artifact) => isModelArtifact(artifact)).length;
+    .filter((artifact) => isModelResponseArtifact(artifact)).length;
 
   return (
     <div className="trace-graph-wrap">
       <div className="trace-legend">
         <span>{steps.length} steps</span>
-        <span>{modelArtifactCount} LLM artifacts</span>
+        <span>{modelCallCount} LLM calls</span>
         <span>{artifactCount} artifacts</span>
       </div>
       <div className="trace-graph">
@@ -685,8 +685,9 @@ function TraceGraph({
                 type="button"
               >
                 <span className={`node-dot ${statusTone(step.status)}`} />
-                <span className="node-kind">Step {step.sequence}</span>
-                <strong>{labelize(step.step_type)}</strong>
+                <span className="node-kind">{stepNodeKind(step)} · {step.sequence}</span>
+                <strong>{stepNodeTitle(step)}</strong>
+                {stepNodeDetail(step) ? <span className="step-detail">{stepNodeDetail(step)}</span> : null}
                 <StatusPill status={step.status} />
               </button>
               <div className="artifact-chain">
@@ -953,9 +954,9 @@ function AgentRunPage({ agentRunId }: { agentRunId: string }) {
   }, [artifacts.data, selectedArtifactId]);
 
   const allTraceArtifacts = traceData.artifactsByStepId.data ?? {};
-  const modelArtifactCount = Object.values(allTraceArtifacts)
+  const modelCallCount = Object.values(allTraceArtifacts)
     .flat()
-    .filter((artifact) => isModelArtifact(artifact)).length;
+    .filter((artifact) => isModelResponseArtifact(artifact)).length;
 
   return (
     <div className="page stack">
@@ -970,7 +971,7 @@ function AgentRunPage({ agentRunId }: { agentRunId: string }) {
             <Metric label="Status" value={run.data.status} tone={statusTone(run.data.status)} />
             <Metric label="Model" value={run.data.model_profile ?? "-"} />
             <Metric label="Duration" value={formatDuration(run.data.started_at, run.data.finished_at)} />
-            <Metric label="LLM artifacts" value={modelArtifactCount} tone="neutral" />
+            <Metric label="LLM calls" value={modelCallCount} tone="neutral" />
           </div>
         ) : null}
       </AsyncBoundary>
@@ -1392,8 +1393,55 @@ function artifactIcon(artifact: AgentArtifact) {
   return <Package size={16} />;
 }
 
-function isModelArtifact(artifact: AgentArtifact) {
-  return artifact.artifact_type === "prompt" || artifact.artifact_type === "raw_model_response";
+function isModelResponseArtifact(artifact: AgentArtifact) {
+  return artifact.artifact_type === "raw_model_response";
+}
+
+function stepNodeKind(step: AgentStep) {
+  if (step.step_type === "build_test_plan") {
+    return "Agent planner";
+  }
+  if (step.step_type === "tool_call") {
+    return "Repository tool";
+  }
+  if (step.step_type === "generate_questions") {
+    return "Structured generation";
+  }
+  return "Step";
+}
+
+function stepNodeTitle(step: AgentStep) {
+  if (step.step_type === "build_test_plan") {
+    return "Repository inspection";
+  }
+  if (step.step_type === "tool_call" && typeof step.input_summary.tool_name === "string") {
+    return step.input_summary.tool_name;
+  }
+  if (step.step_type === "generate_questions") {
+    return "Generate test";
+  }
+  if (step.step_type === "persist_result") {
+    return "Persist result";
+  }
+  return labelize(step.step_type);
+}
+
+function stepNodeDetail(step: AgentStep) {
+  if (step.step_type === "build_test_plan") {
+    const turns = step.output_summary.model_turn_count;
+    const toolCalls = step.output_summary.completed_tool_call_count;
+    if (typeof turns === "number" && typeof toolCalls === "number") {
+      return `${turns} model ${turns === 1 ? "turn" : "turns"} · ${toolCalls} tool ${toolCalls === 1 ? "call" : "calls"}`;
+    }
+  }
+  if (step.step_type === "tool_call") {
+    const duration = step.output_summary.duration_ms;
+    const evidence = step.output_summary.evidence_ref_count;
+    if (typeof duration === "number" && typeof evidence === "number") {
+      return `${duration} ms · ${evidence} evidence ${evidence === 1 ? "ref" : "refs"}`;
+    }
+  }
+  return null;
 }
 
 function testTitle(test: GeneratedTest) {

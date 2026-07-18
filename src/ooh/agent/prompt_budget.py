@@ -323,8 +323,43 @@ def compact_tool_observation(value: dict[str, Any], *, max_bytes: int) -> dict[s
         return value
     compact = _selected_mapping(
         value,
-        ("schema_version", "planned_call_count", "completed_call_count", "failed_call_count"),
+        (
+            "schema_version",
+            "model_turn_count",
+            "completed_call_count",
+            "failed_call_count",
+            "duplicate_call_count",
+        ),
     )
+    compact["truncated"] = True
+    compact["failed_tool_calls"] = []
+    for failed_call in _dict_items(value.get("failed_tool_calls")):
+        compact_failure = _selected_mapping(
+            failed_call,
+            ("call_id", "tool_name", "arguments", "error_type", "error"),
+        )
+        if not _try_append(
+            compact,
+            "failed_tool_calls",
+            compact_failure,
+            max_bytes=max_bytes,
+        ):
+            break
+
+    compact["duplicate_tool_calls"] = []
+    for duplicate_call in _dict_items(value.get("duplicate_tool_calls")):
+        compact_duplicate = _selected_mapping(
+            duplicate_call,
+            ("call_id", "tool_name", "arguments", "error"),
+        )
+        if not _try_append(
+            compact,
+            "duplicate_tool_calls",
+            compact_duplicate,
+            max_bytes=max_bytes,
+        ):
+            break
+
     tool_calls = _dict_items(value.get("tool_calls"))
     compact["tool_calls"] = []
     per_call_bytes = max(200, max_bytes // max(len(tool_calls), 1) // 2)
@@ -345,10 +380,6 @@ def compact_tool_observation(value: dict[str, Any], *, max_bytes: int) -> dict[s
         }
         if not _try_append(compact, "tool_calls", compact_call, max_bytes=max_bytes):
             break
-    compact["truncated"] = True
-    if json_size_bytes(compact) <= max_bytes:
-        return compact
-    compact.pop("truncated", None)
     return compact
 
 

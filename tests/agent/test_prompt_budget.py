@@ -47,10 +47,11 @@ def test_prompt_context_view_is_structured_and_bounded() -> None:
 
 def test_tool_observation_is_bounded_without_losing_call_identity() -> None:
     observation = {
-        "schema_version": 1,
-        "planned_call_count": 2,
+        "schema_version": 2,
+        "model_turn_count": 3,
         "completed_call_count": 2,
         "failed_call_count": 0,
+        "duplicate_call_count": 0,
         "tool_calls": [
             {
                 "call_id": f"read-{index}",
@@ -64,6 +65,7 @@ def test_tool_observation_is_bounded_without_losing_call_identity() -> None:
             for index in range(2)
         ],
         "failed_tool_calls": [],
+        "duplicate_tool_calls": [],
     }
 
     compact = compact_tool_observation(observation, max_bytes=1_200)

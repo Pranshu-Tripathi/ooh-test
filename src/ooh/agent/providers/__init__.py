@@ -5,6 +5,8 @@ from ooh.agent.providers.base import (
     ModelRequest,
     ModelResponse,
     ModelRole,
+    ModelToolCall,
+    ModelToolDefinition,
     JsonSchema,
     ResponseFormat,
 )
@@ -18,6 +20,8 @@ __all__ = [
     "ModelRequest",
     "ModelResponse",
     "ModelRole",
+    "ModelToolCall",
+    "ModelToolDefinition",
     "JsonSchema",
     "OllamaModelProvider",
     "ResponseFormat",

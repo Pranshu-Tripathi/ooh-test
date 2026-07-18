@@ -139,6 +139,20 @@ def test_tool_registry_exposes_class_contracts() -> None:
     assert "path" in read_file_range.input_schema()["properties"]
 
 
+def test_tool_registry_canonicalizes_implicit_defaults() -> None:
+    registry = default_tool_registry()
+
+    assert registry.canonical_arguments("repo.list_files", {}) == registry.canonical_arguments(
+        "repo.list_files",
+        {
+            "path_prefix": None,
+            "language": None,
+            "parse_status": None,
+            "limit": None,
+        },
+    )
+
+
 def test_tool_executor_validates_arguments_and_records_success(tmp_path: Path) -> None:
     context = build_tool_context(tmp_path)
     recorder = RecordingToolTraceRecorder()

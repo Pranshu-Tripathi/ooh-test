@@ -9,18 +9,6 @@ from ooh.agent.prompt_budget import (
 )
 from ooh.agent.tools import ToolExecution
 
-MAX_INSPECT_CODE_PATHS = 3
-READ_FILE_RANGE_MAX_LINES = 80
-READ_FILE_RANGE_MAX_BYTES = 8_000
-
-
-@dataclass(frozen=True)
-class PlannedToolCall:
-    call_id: str
-    tool_name: str
-    arguments: dict[str, Any]
-
-
 @dataclass(frozen=True)
 class FailedToolCall:
     call_id: str
@@ -30,57 +18,28 @@ class FailedToolCall:
     error: str
 
 
-def build_inspection_plan(context_pack: dict[str, Any]) -> list[PlannedToolCall]:
-    if not snapshot_index_uri(context_pack):
-        return []
-
-    target_paths = code_paths_from_context_pack(context_pack)
-    planned_calls = [
-        PlannedToolCall(
-            call_id="inspect-list-python-files",
-            tool_name="repo.list_files",
-            arguments={
-                "language": "python",
-                "parse_status": "parsed",
-                "limit": 25,
-            },
-        )
-    ]
-    for index, path in enumerate(target_paths[:MAX_INSPECT_CODE_PATHS], start=1):
-        planned_calls.append(
-            PlannedToolCall(
-                call_id=f"inspect-symbols-{index}",
-                tool_name="repo.list_symbols",
-                arguments={"path": path, "limit": 50},
-            )
-        )
-        planned_calls.append(
-            PlannedToolCall(
-                call_id=f"inspect-source-{index}",
-                tool_name="repo.read_file_range",
-                arguments={
-                    "path": path,
-                    "start_line": 1,
-                    "max_lines": READ_FILE_RANGE_MAX_LINES,
-                    "max_bytes": READ_FILE_RANGE_MAX_BYTES,
-                },
-            )
-        )
-    return planned_calls
+@dataclass(frozen=True)
+class DuplicateToolCall:
+    call_id: str
+    tool_name: str
+    arguments: dict[str, Any]
+    signature: str
 
 
 def inspection_prompt_payload(
     *,
-    planned_calls: list[PlannedToolCall],
+    model_turn_count: int,
     executions: list[ToolExecution],
     failed_calls: list[FailedToolCall],
+    duplicate_calls: list[DuplicateToolCall],
     max_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
 ) -> dict[str, Any]:
     payload = {
-        "schema_version": 1,
-        "planned_call_count": len(planned_calls),
+        "schema_version": 2,
+        "model_turn_count": model_turn_count,
         "completed_call_count": len(executions),
         "failed_call_count": len(failed_calls),
+        "duplicate_call_count": len(duplicate_calls),
         "tool_calls": [
             {
                 "call_id": execution.invocation.call_id,
@@ -102,6 +61,15 @@ def inspection_prompt_payload(
             }
             for failed_call in failed_calls
         ],
+        "duplicate_tool_calls": [
+            {
+                "call_id": duplicate_call.call_id,
+                "tool_name": duplicate_call.tool_name,
+                "arguments": duplicate_call.arguments,
+                "error": "identical tool call already executed",
+            }
+            for duplicate_call in duplicate_calls
+        ],
     }
     return compact_tool_observation(payload, max_bytes=max_bytes)
 
@@ -110,7 +78,10 @@ def context_pack_with_tool_inspection(
     context_pack: dict[str, Any],
     tool_inspection: dict[str, Any],
 ) -> dict[str, Any]:
-    if not tool_inspection.get("tool_calls") and not tool_inspection.get("failed_tool_calls"):
+    if not any(
+        tool_inspection.get(key)
+        for key in ("tool_calls", "failed_tool_calls", "duplicate_tool_calls")
+    ):
         return context_pack
     return {**context_pack, "tool_inspection": tool_inspection}
 
@@ -133,34 +104,3 @@ def snapshot_id(context_pack: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     return value
-
-
-def code_paths_from_context_pack(context_pack: dict[str, Any]) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-
-    for file in dict_items(context_pack.get("included_files")):
-        add_path(paths, seen, file.get("path"))
-
-    for source_ref in dict_items(context_pack.get("source_refs")):
-        source_uri = source_ref.get("source_uri")
-        if isinstance(source_uri, str) and source_uri.startswith("code:"):
-            add_path(paths, seen, source_uri.removeprefix("code:"))
-
-    return paths
-
-
-def add_path(paths: list[str], seen: set[str], value: object) -> None:
-    if not isinstance(value, str):
-        return
-    path = value.strip()
-    if not path or path in seen:
-        return
-    seen.add(path)
-    paths.append(path)
-
-
-def dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
