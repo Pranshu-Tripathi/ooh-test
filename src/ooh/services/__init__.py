@@ -13,11 +13,12 @@ from ooh.services.jobs import JobService
 from ooh.services.learnings import LearningService
 from ooh.services.repositories import RepositoryIngestionResult, RepositoryService
 from ooh.services.test_generation import TestGenerationJobResult, TestGenerationService
-from ooh.services.traces import TraceService
+from ooh.services.traces import AgentRunSnapshot, TraceService
 
 __all__ = [
     "AnswerJudgingService",
     "AnswerSubmission",
+    "AgentRunSnapshot",
     "ConflictError",
     "JobService",
     "LearningService",

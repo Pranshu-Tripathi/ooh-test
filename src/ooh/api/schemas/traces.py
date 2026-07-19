@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -18,6 +20,9 @@ from ooh.db.models import (
     ProvenanceRefRead,
     ProvenanceRefType,
 )
+
+if TYPE_CHECKING:
+    from ooh.services.traces import AgentRunSnapshot
 
 
 class AgentRunResponse(BaseModel):
@@ -125,6 +130,24 @@ class AgentArtifactResponse(BaseModel):
             artifact_uri=artifact.artifact_uri,
             content_hash=artifact.content_hash,
             created_at=artifact.created_at,
+        )
+
+
+class AgentRunSnapshotResponse(BaseModel):
+    run: AgentRunResponse
+    steps: list[AgentStepResponse]
+    artifacts: list[AgentArtifactResponse]
+    last_event_id: int
+
+    @classmethod
+    def from_snapshot(cls, snapshot: AgentRunSnapshot) -> "AgentRunSnapshotResponse":
+        return cls(
+            run=AgentRunResponse.from_record(snapshot.run),
+            steps=[AgentStepResponse.from_record(step) for step in snapshot.steps],
+            artifacts=[
+                AgentArtifactResponse.from_record(artifact) for artifact in snapshot.artifacts
+            ],
+            last_event_id=snapshot.last_event_id,
         )
 
 

@@ -338,6 +338,16 @@ class AgentTraceRepo:
             ).all()
             return [AgentArtifactRead.model_validate(artifact) for artifact in artifacts]
 
+    def list_artifacts_for_run(self, agent_run_id: UUID) -> list[AgentArtifactRead]:
+        with self.db.session() as session:
+            artifacts = session.scalars(
+                select(AgentArtifact)
+                .join(AgentStep, AgentArtifact.agent_step_id == AgentStep.id)
+                .where(AgentStep.agent_run_id == agent_run_id)
+                .order_by(AgentStep.sequence, AgentArtifact.created_at)
+            ).all()
+            return [AgentArtifactRead.model_validate(artifact) for artifact in artifacts]
+
     def get_artifact(self, artifact_id: UUID) -> AgentArtifactRead | None:
         with self.db.session() as session:
             artifact = session.get(AgentArtifact, artifact_id)

@@ -13,6 +13,7 @@ from ooh.db.repos import (
     AttentionProfileRepo,
     ContextPackRepo,
     DriftEventRepo,
+    ExecutionEventRepo,
     GeneratedTestRepo,
     GuidanceSourceRepo,
     JobRepo,
@@ -164,6 +165,7 @@ def build_trace_service(db: Database | None = None) -> TraceService:
     db = db or get_database()
     return TraceService(
         agent_trace_repo=AgentTraceRepo(db),
+        execution_event_repo=ExecutionEventRepo(db),
         repository_repo=RepositoryRepo(db),
     )
 

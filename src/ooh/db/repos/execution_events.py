@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ooh.db.connection import Database
@@ -72,6 +72,24 @@ class ExecutionEventRepo:
                 .limit(limit)
             ).all()
             return [ExecutionEventRead.model_validate(event) for event in events]
+
+    def latest_id_for_agent_run(self, agent_run_id: UUID) -> int:
+        with self.db.session() as session:
+            latest_event_id = session.scalar(
+                select(func.max(ExecutionEvent.id)).where(
+                    ExecutionEvent.agent_run_id == agent_run_id
+                )
+            )
+            return int(latest_event_id or 0)
+
+    def latest_id_for_repository(self, repository_id: UUID) -> int:
+        with self.db.session() as session:
+            latest_event_id = session.scalar(
+                select(func.max(ExecutionEvent.id)).where(
+                    ExecutionEvent.repository_id == repository_id
+                )
+            )
+            return int(latest_event_id or 0)
 
     @staticmethod
     def _validate_cursor(*, after_event_id: int, limit: int) -> None:

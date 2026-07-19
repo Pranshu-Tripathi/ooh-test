@@ -186,6 +186,24 @@ export type AgentArtifact = {
   created_at: string;
 };
 
+export type ExecutionEvent = {
+  id: number;
+  repository_id: string | null;
+  job_id: string | null;
+  agent_run_id: string | null;
+  agent_step_id: string | null;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AgentRunSnapshot = {
+  run: AgentRun;
+  steps: AgentStep[];
+  artifacts: AgentArtifact[];
+  last_event_id: number;
+};
+
 export type ProvenanceRef = {
   id: string;
   artifact_id: string;
