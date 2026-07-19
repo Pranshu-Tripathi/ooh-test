@@ -4,6 +4,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from ooh.db.connection import Database
 from ooh.db.models import (
@@ -19,10 +20,12 @@ from ooh.db.models import (
     AgentStepRead,
     AgentStepType,
     ContextPack,
+    ExecutionEventType,
     ProvenanceRef,
     ProvenanceRefRead,
     ProvenanceRefType,
 )
+from ooh.db.repos.execution_events import ExecutionEventInput, append_execution_event
 
 
 @dataclass(frozen=True)
@@ -82,7 +85,9 @@ class AgentTraceRepo:
             session.add(run)
             session.flush()
             session.refresh(run)
-            return AgentRunRead.model_validate(run)
+            run_read = AgentRunRead.model_validate(run)
+            self._append_run_event(session, run_read, ExecutionEventType.RUN_CREATED)
+            return run_read
 
     def get_run(self, run_id: UUID) -> AgentRunRead | None:
         with self.db.session() as session:
@@ -116,7 +121,9 @@ class AgentTraceRepo:
             run.started_at = run.started_at or datetime.now(UTC)
             session.flush()
             session.refresh(run)
-            return AgentRunRead.model_validate(run)
+            run_read = AgentRunRead.model_validate(run)
+            self._append_run_event(session, run_read, ExecutionEventType.RUN_STATUS_CHANGED)
+            return run_read
 
     def mark_run_finished(self, run_id: UUID, *, status: AgentStatus) -> AgentRunRead:
         with self.db.session() as session:
@@ -128,12 +135,18 @@ class AgentTraceRepo:
             run.finished_at = datetime.now(UTC)
             session.flush()
             session.refresh(run)
-            return AgentRunRead.model_validate(run)
+            run_read = AgentRunRead.model_validate(run)
+            self._append_run_event(session, run_read, ExecutionEventType.RUN_STATUS_CHANGED)
+            return run_read
 
     def create_step(self, input: AgentStepInput) -> AgentStepRead:
         with self.db.session() as session:
             if input.iteration is not None and input.iteration < 1:
                 raise ValueError("agent step iteration must be positive")
+
+            agent_run = session.get(AgentRun, input.agent_run_id)
+            if agent_run is None:
+                raise ValueError("agent run not found")
 
             parent_step = None
             context_pack_id = input.context_pack_id
@@ -155,9 +168,6 @@ class AgentTraceRepo:
                     and parent_step.context_pack_id != context_pack_id
                 ):
                     raise ValueError("child and parent agent steps must use the same context pack")
-                agent_run = session.get(AgentRun, input.agent_run_id)
-                if agent_run is None:
-                    raise ValueError("agent run not found")
                 if (
                     agent_run.repository_id is not None
                     and context_pack.repository_id != agent_run.repository_id
@@ -182,7 +192,14 @@ class AgentTraceRepo:
             session.add(step)
             session.flush()
             session.refresh(step)
-            return AgentStepRead.model_validate(step)
+            step_read = AgentStepRead.model_validate(step)
+            self._append_step_event(
+                session,
+                agent_run=AgentRunRead.model_validate(agent_run),
+                step=step_read,
+                event_type=ExecutionEventType.STEP_CREATED,
+            )
+            return step_read
 
     def list_steps_for_run(self, agent_run_id: UUID) -> list[AgentStepRead]:
         with self.db.session() as session:
@@ -216,7 +233,14 @@ class AgentTraceRepo:
             step.started_at = step.started_at or datetime.now(UTC)
             session.flush()
             session.refresh(step)
-            return AgentStepRead.model_validate(step)
+            step_read = AgentStepRead.model_validate(step)
+            self._append_step_event_for_step(
+                session,
+                step=step,
+                step_read=step_read,
+                event_type=ExecutionEventType.STEP_STATUS_CHANGED,
+            )
+            return step_read
 
     def mark_step_activity(
         self,
@@ -236,7 +260,14 @@ class AgentTraceRepo:
             step.started_at = step.started_at or datetime.now(UTC)
             session.flush()
             session.refresh(step)
-            return AgentStepRead.model_validate(step)
+            step_read = AgentStepRead.model_validate(step)
+            self._append_step_event_for_step(
+                session,
+                step=step,
+                step_read=step_read,
+                event_type=ExecutionEventType.STEP_ACTIVITY_CHANGED,
+            )
+            return step_read
 
     def mark_step_finished(
         self,
@@ -260,10 +291,20 @@ class AgentTraceRepo:
             step.finished_at = datetime.now(UTC)
             session.flush()
             session.refresh(step)
-            return AgentStepRead.model_validate(step)
+            step_read = AgentStepRead.model_validate(step)
+            self._append_step_event_for_step(
+                session,
+                step=step,
+                step_read=step_read,
+                event_type=ExecutionEventType.STEP_STATUS_CHANGED,
+            )
+            return step_read
 
     def create_artifact(self, input: AgentArtifactInput) -> AgentArtifactRead:
         with self.db.session() as session:
+            step = session.get(AgentStep, input.agent_step_id)
+            if step is None:
+                raise ValueError("agent step not found")
             artifact = AgentArtifact(
                 agent_step_id=input.agent_step_id,
                 artifact_type=input.artifact_type,
@@ -273,7 +314,20 @@ class AgentTraceRepo:
             session.add(artifact)
             session.flush()
             session.refresh(artifact)
-            return AgentArtifactRead.model_validate(artifact)
+            artifact_read = AgentArtifactRead.model_validate(artifact)
+            agent_run = self._get_run_for_step(session, step)
+            append_execution_event(
+                session,
+                ExecutionEventInput(
+                    event_type=ExecutionEventType.ARTIFACT_CREATED,
+                    repository_id=agent_run.repository_id,
+                    job_id=agent_run.job_id,
+                    agent_run_id=agent_run.id,
+                    agent_step_id=step.id,
+                    payload={"artifact": artifact_read.model_dump(mode="json")},
+                ),
+            )
+            return artifact_read
 
     def list_artifacts_for_step(self, agent_step_id: UUID) -> list[AgentArtifactRead]:
         with self.db.session() as session:
@@ -316,3 +370,63 @@ class AgentTraceRepo:
                 ProvenanceRefRead.model_validate(provenance_ref)
                 for provenance_ref in provenance_refs
             ]
+
+    @staticmethod
+    def _append_run_event(
+        session: Session,
+        run: AgentRunRead,
+        event_type: ExecutionEventType,
+    ) -> None:
+        append_execution_event(
+            session,
+            ExecutionEventInput(
+                event_type=event_type,
+                repository_id=run.repository_id,
+                job_id=run.job_id,
+                agent_run_id=run.id,
+                payload={"run": run.model_dump(mode="json")},
+            ),
+        )
+
+    @classmethod
+    def _append_step_event_for_step(
+        cls,
+        session: Session,
+        *,
+        step: AgentStep,
+        step_read: AgentStepRead,
+        event_type: ExecutionEventType,
+    ) -> None:
+        cls._append_step_event(
+            session,
+            agent_run=cls._get_run_for_step(session, step),
+            step=step_read,
+            event_type=event_type,
+        )
+
+    @staticmethod
+    def _append_step_event(
+        session: Session,
+        *,
+        agent_run: AgentRunRead,
+        step: AgentStepRead,
+        event_type: ExecutionEventType,
+    ) -> None:
+        append_execution_event(
+            session,
+            ExecutionEventInput(
+                event_type=event_type,
+                repository_id=agent_run.repository_id,
+                job_id=agent_run.job_id,
+                agent_run_id=agent_run.id,
+                agent_step_id=step.id,
+                payload={"step": step.model_dump(mode="json")},
+            ),
+        )
+
+    @staticmethod
+    def _get_run_for_step(session: Session, step: AgentStep) -> AgentRunRead:
+        agent_run = session.get(AgentRun, step.agent_run_id)
+        if agent_run is None:
+            raise ValueError("agent run not found")
+        return AgentRunRead.model_validate(agent_run)

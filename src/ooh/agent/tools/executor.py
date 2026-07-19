@@ -8,7 +8,13 @@ from uuid import UUID
 from ooh.agent.artifacts import AgentArtifactStore
 from ooh.agent.tools.common import RepoToolResult, RepositoryToolContext
 from ooh.agent.tools.registry import ToolRegistry, default_tool_registry
-from ooh.db.models import AgentArtifactType, AgentStatus, AgentStepType, ProvenanceRefType
+from ooh.db.models import (
+    AgentActivity,
+    AgentArtifactType,
+    AgentStatus,
+    AgentStepType,
+    ProvenanceRefType,
+)
 from ooh.db.repos import AgentArtifactInput, AgentStepInput, AgentTraceRepo, ProvenanceRefInput
 
 
@@ -20,6 +26,9 @@ class ToolInvocation:
     agent_run_id: UUID | None = None
     sequence: int | None = None
     call_id: str | None = None
+    parent_step_id: UUID | None = None
+    context_pack_id: UUID | None = None
+    iteration: int | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +36,7 @@ class ToolExecution:
     invocation: ToolInvocation
     result: RepoToolResult
     duration_ms: int
+    agent_step_id: UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +105,9 @@ class ToolExecutor:
         agent_run_id: UUID | None = None,
         sequence: int | None = None,
         call_id: str | None = None,
+        parent_step_id: UUID | None = None,
+        context_pack_id: UUID | None = None,
+        iteration: int | None = None,
     ) -> ToolExecution:
         invocation = ToolInvocation(
             tool_name=tool_name,
@@ -103,6 +116,9 @@ class ToolExecutor:
             agent_run_id=agent_run_id,
             sequence=sequence,
             call_id=call_id,
+            parent_step_id=parent_step_id,
+            context_pack_id=context_pack_id,
+            iteration=iteration,
         )
         handle = self.recorder.started(invocation)
         started_at = time.monotonic()
@@ -117,6 +133,7 @@ class ToolExecutor:
             invocation=invocation,
             result=result,
             duration_ms=elapsed_ms(started_at),
+            agent_step_id=handle.agent_step_id,
         )
         self.recorder.succeeded(handle, execution)
         return execution
@@ -143,6 +160,9 @@ class AgentTraceToolRecorder:
                 agent_run_id=invocation.agent_run_id,
                 step_type=AgentStepType.TOOL_CALL,
                 sequence=invocation.sequence,
+                parent_step_id=invocation.parent_step_id,
+                context_pack_id=invocation.context_pack_id,
+                iteration=invocation.iteration,
                 input_summary={
                     "tool_name": invocation.tool_name,
                     "arguments": invocation.arguments,
@@ -152,7 +172,10 @@ class AgentTraceToolRecorder:
                 },
             )
         )
-        running_step = self.agent_trace_repo.mark_step_running(step.id)
+        running_step = self.agent_trace_repo.mark_step_running(
+            step.id,
+            activity=AgentActivity.EXECUTING_TOOL,
+        )
         return ToolTraceHandle(agent_step_id=running_step.id)
 
     def succeeded(
@@ -243,7 +266,11 @@ def elapsed_ms(started_at: float) -> int:
 
 
 def tool_artifact_file_name(execution: ToolExecution) -> str:
-    sequence = execution.invocation.sequence if execution.invocation.sequence is not None else "unsequenced"
+    sequence = (
+        execution.invocation.sequence
+        if execution.invocation.sequence is not None
+        else "unsequenced"
+    )
     return f"tool-{sequence}-{safe_tool_name(execution.invocation.tool_name)}-result.json"
 
 
@@ -264,8 +291,12 @@ def provenance_input_from_evidence_ref(
         artifact_id=artifact_id,
         ref_type=provenance_type_for_source_type(evidence_ref.get("source_type")),
         ref_uri=source_uri,
-        content_hash=evidence_ref.get("content_hash") if isinstance(evidence_ref.get("content_hash"), str) else None,
-        metadata=evidence_ref.get("metadata") if isinstance(evidence_ref.get("metadata"), dict) else {},
+        content_hash=evidence_ref.get("content_hash")
+        if isinstance(evidence_ref.get("content_hash"), str)
+        else None,
+        metadata=evidence_ref.get("metadata")
+        if isinstance(evidence_ref.get("metadata"), dict)
+        else {},
     )
 
 

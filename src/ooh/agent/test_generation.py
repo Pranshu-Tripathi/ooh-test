@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, replace
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 
@@ -12,6 +13,14 @@ from ooh.agent.contracts import (
     normalize_generated_test_payload,
 )
 from ooh.agent.evidence import EvidenceVerificationResult, verify_generated_test_evidence
+from ooh.agent.execution_tracing import (
+    ExecutionTracer,
+    TraceBranch,
+    TraceHandle,
+    TraceNodeSpec,
+    TracedModelCall,
+    execute_model_call,
+)
 from ooh.agent.loop_runtime import LoopDeadline
 from ooh.agent.prompt_budget import (
     DEFAULT_GENERATION_PROMPT_MAX_BYTES,
@@ -22,8 +31,13 @@ from ooh.agent.prompt_budget import (
     truncate_text_bytes,
 )
 from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, ModelResponse
+from ooh.db.models import AgentActivity, AgentArtifactType, AgentStepType
 
 TEST_GENERATION_PROMPT_VERSION = "test-generation-v1"
+GENERATION_MODEL_CALL_SEQUENCE_BASE = 100_000
+GENERATION_TURN_SEQUENCE_STRIDE = 10
+GENERATION_VALIDATION_SEQUENCE_OFFSET = 1
+GENERATION_EVIDENCE_SEQUENCE_OFFSET = 2
 TEST_TYPE_BY_PACK_TYPE: dict[str, GeneratedTestType] = {
     "high_level_design": "short_answer",
     "low_level_components": "mcq_single",
@@ -50,6 +64,9 @@ class GeneratedTestLoopTurn:
     payload: dict[str, Any] | None
     evidence_error: str | None = None
     evidence_result: EvidenceVerificationResult | None = None
+    model_trace: TracedModelCall | None = None
+    validation_trace: TraceHandle | None = None
+    evidence_trace: TraceHandle | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +108,7 @@ class GeneratedTestAgentLoop:
         max_evidence_regenerations: int = 1,
         max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
         max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+        tracer: ExecutionTracer | None = None,
     ) -> None:
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be non-negative")
@@ -106,12 +124,14 @@ class GeneratedTestAgentLoop:
         self.max_evidence_regenerations = max_evidence_regenerations
         self.max_prompt_bytes = max_prompt_bytes
         self.max_tool_observation_bytes = max_tool_observation_bytes
+        self.tracer = tracer
 
     def run(
         self,
         context_pack: dict[str, Any],
         *,
         deadline: LoopDeadline | None = None,
+        trace_branch: TraceBranch | None = None,
     ) -> GeneratedTestLoopResult:
         turns: list[GeneratedTestLoopTurn] = []
         test_type = select_generated_test_type(context_pack)
@@ -126,6 +146,7 @@ class GeneratedTestAgentLoop:
         sequence = 0
         repair_attempts = 0
         evidence_regenerations = 0
+        next_parent_step_id = trace_branch.parent_step_id if trace_branch is not None else None
 
         while True:
             sequence += 1
@@ -134,9 +155,50 @@ class GeneratedTestAgentLoop:
                     request,
                     timeout_seconds=deadline.remaining_seconds(action="calling the test model"),
                 )
-            response = self.provider.generate(request)
+            turn_sequence_base = (
+                trace_branch.sequence_base
+                + GENERATION_MODEL_CALL_SEQUENCE_BASE
+                + sequence * GENERATION_TURN_SEQUENCE_STRIDE
+                if trace_branch is not None
+                else 0
+            )
+            model_trace = execute_model_call(
+                provider=self.provider,
+                request=request,
+                tracer=self.tracer,
+                spec=(
+                    TraceNodeSpec(
+                        branch=trace_branch,
+                        step_type=AgentStepType.MODEL_CALL,
+                        sequence=turn_sequence_base,
+                        iteration=sequence,
+                        activity=AgentActivity.WAITING_ON_MODEL,
+                        action=action,
+                        parent_step_id=next_parent_step_id,
+                        input_summary={"phase": "test_generation"},
+                    )
+                    if trace_branch is not None
+                    else None
+                ),
+            )
+            response = model_trace.response
             if deadline is not None:
                 deadline.remaining_seconds(action="validating the test model response")
+            model_step_id = (
+                model_trace.handle.step.id
+                if model_trace.handle is not None
+                else next_parent_step_id
+            )
+            validation_trace = self._start_trace_step(
+                trace_branch=trace_branch,
+                parent_step_id=model_step_id,
+                step_type=AgentStepType.VALIDATE_OUTPUT,
+                activity=AgentActivity.VALIDATING,
+                action="validate_output",
+                sequence=turn_sequence_base + GENERATION_VALIDATION_SEQUENCE_OFFSET,
+                iteration=sequence,
+                input_summary={"model_action": action, "test_type": test_type},
+            )
             try:
                 payload = parse_generated_test_payload(
                     response.content,
@@ -144,6 +206,16 @@ class GeneratedTestAgentLoop:
                 )
             except GeneratedTestPayloadError as exc:
                 validation_error = str(exc)
+                self._fail_trace_step(
+                    validation_trace,
+                    exc,
+                    suffix="validation-error",
+                    payload={
+                        "turn_sequence": sequence,
+                        "action": action,
+                        "validation_error": validation_error,
+                    },
+                )
                 turns.append(
                     GeneratedTestLoopTurn(
                         sequence=sequence,
@@ -152,6 +224,8 @@ class GeneratedTestAgentLoop:
                         model_response=response,
                         validation_error=validation_error,
                         payload=None,
+                        model_trace=model_trace,
+                        validation_trace=validation_trace,
                     )
                 )
                 if repair_attempts >= self.max_repair_attempts:
@@ -170,11 +244,54 @@ class GeneratedTestAgentLoop:
                     max_tool_observation_bytes=self.max_tool_observation_bytes,
                 )
                 action = "repair"
+                if validation_trace is not None:
+                    next_parent_step_id = validation_trace.step.id
                 continue
 
-            evidence_result = verify_generated_test_evidence(payload, context_pack)
+            self._succeed_trace_step(
+                validation_trace,
+                output_summary={
+                    "payload_type": payload.get("type"),
+                    "schema_valid": True,
+                },
+            )
+            evidence_trace = self._start_trace_step(
+                trace_branch=trace_branch,
+                parent_step_id=(
+                    validation_trace.step.id if validation_trace is not None else model_step_id
+                ),
+                step_type=AgentStepType.VERIFY_EVIDENCE,
+                activity=AgentActivity.VERIFYING_EVIDENCE,
+                action="verify_evidence",
+                sequence=turn_sequence_base + GENERATION_EVIDENCE_SEQUENCE_OFFSET,
+                iteration=sequence,
+                input_summary={"evidence_ref_count": len(payload.get("evidence_refs", []))},
+            )
+            try:
+                evidence_result = verify_generated_test_evidence(payload, context_pack)
+            except Exception as exc:
+                self._fail_trace_step(
+                    evidence_trace,
+                    exc,
+                    suffix="evidence-verification-error",
+                    payload={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+                raise
             if not evidence_result.is_valid:
                 evidence_error = evidence_result.error_message()
+                evidence_summary = evidence_result.to_dict()
+                self._fail_trace_step(
+                    evidence_trace,
+                    GeneratedTestEvidenceError(evidence_error),
+                    suffix="evidence-error",
+                    payload={
+                        "turn_sequence": sequence,
+                        "action": action,
+                        "evidence_error": evidence_error,
+                        "evidence_result": evidence_summary,
+                    },
+                    output_summary=evidence_summary,
+                )
                 turns.append(
                     GeneratedTestLoopTurn(
                         sequence=sequence,
@@ -185,6 +302,9 @@ class GeneratedTestAgentLoop:
                         payload=payload,
                         evidence_error=evidence_error,
                         evidence_result=evidence_result,
+                        model_trace=model_trace,
+                        validation_trace=validation_trace,
+                        evidence_trace=evidence_trace,
                     )
                 )
                 if evidence_regenerations >= self.max_evidence_regenerations:
@@ -204,8 +324,14 @@ class GeneratedTestAgentLoop:
                     max_tool_observation_bytes=self.max_tool_observation_bytes,
                 )
                 action = "regenerate_evidence"
+                if evidence_trace is not None:
+                    next_parent_step_id = evidence_trace.step.id
                 continue
 
+            self._succeed_trace_step(
+                evidence_trace,
+                output_summary={"evidence_valid": True, **evidence_result.to_dict()},
+            )
             turns.append(
                 GeneratedTestLoopTurn(
                     sequence=sequence,
@@ -215,6 +341,9 @@ class GeneratedTestAgentLoop:
                     validation_error=None,
                     payload=evidence_result.payload,
                     evidence_result=evidence_result,
+                    model_trace=model_trace,
+                    validation_trace=validation_trace,
+                    evidence_trace=evidence_trace,
                 )
             )
             return GeneratedTestLoopResult(
@@ -222,6 +351,61 @@ class GeneratedTestAgentLoop:
                 turns=turns,
                 prompt_version=TEST_GENERATION_PROMPT_VERSION,
             )
+
+    def _start_trace_step(
+        self,
+        *,
+        trace_branch: TraceBranch | None,
+        parent_step_id: UUID | None,
+        step_type: AgentStepType,
+        activity: AgentActivity,
+        action: str,
+        sequence: int,
+        iteration: int,
+        input_summary: dict[str, Any],
+    ) -> TraceHandle | None:
+        if self.tracer is None or trace_branch is None:
+            return None
+        return self.tracer.start(
+            TraceNodeSpec(
+                branch=trace_branch,
+                parent_step_id=parent_step_id,
+                step_type=step_type,
+                sequence=sequence,
+                iteration=iteration,
+                activity=activity,
+                action=action,
+                input_summary=input_summary,
+            )
+        )
+
+    def _succeed_trace_step(
+        self,
+        handle: TraceHandle | None,
+        *,
+        output_summary: dict[str, Any],
+    ) -> None:
+        if self.tracer is not None and handle is not None:
+            self.tracer.succeed(handle, output_summary=output_summary)
+
+    def _fail_trace_step(
+        self,
+        handle: TraceHandle | None,
+        error: Exception,
+        *,
+        suffix: str,
+        payload: dict[str, Any],
+        output_summary: dict[str, Any] | None = None,
+    ) -> None:
+        if self.tracer is None or handle is None:
+            return
+        self.tracer.write_json_artifact(
+            handle,
+            suffix=suffix,
+            artifact_type=AgentArtifactType.TRACE,
+            payload=payload,
+        )
+        self.tracer.fail(handle, error, output_summary=output_summary)
 
 
 class GeneratedTestPipeline:
@@ -389,7 +573,9 @@ def build_test_generation_evidence_feedback_request(
         "values present in the context pack and return evidence_refs as source_uri strings."
     )
     evidence_excerpt = truncate_text_bytes(
-        json.dumps(evidence_result.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        json.dumps(
+            evidence_result.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ),
         1_200,
     )
     payload_excerpt = truncate_text_bytes(
@@ -507,12 +693,12 @@ def test_type_instructions(test_type: GeneratedTestType) -> str:
     if test_type == "mcq_single":
         return (
             "Set type to mcq_single. Include at least two options as objects like "
-            "{\"id\":\"A\",\"text\":\"...\"} and exactly one correct_option_ids entry. "
+            '{"id":"A","text":"..."} and exactly one correct_option_ids entry. '
             "Do not use answer or correct_answer."
         )
     return (
         "Set type to mcq_multi. Include at least two options as objects like "
-        "{\"id\":\"A\",\"text\":\"...\"} and one or more correct_option_ids entries. "
+        '{"id":"A","text":"..."} and one or more correct_option_ids entries. '
         "Do not use answer or correct_answer."
     )
 

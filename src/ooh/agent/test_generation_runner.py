@@ -8,6 +8,7 @@ from typing import Any
 from uuid import UUID
 
 from ooh.agent.artifacts import AgentArtifactStore
+from ooh.agent.execution_tracing import AgentExecutionTracer, TraceBranch
 from ooh.agent.loop_runtime import DEFAULT_AGENT_LOOP_TIMEOUT_SECONDS, LoopDeadline
 from ooh.agent.providers import ModelProvider
 from ooh.agent.prompt_budget import (
@@ -18,14 +19,14 @@ from ooh.agent.repository_inspection import (
     INSPECTION_PROMPT_VERSION,
     ModelDirectedRepositoryInspector,
     RepositoryInspectionResult,
-    RepositoryInspectionTurn,
 )
-from ooh.agent.tool_inspection import context_pack_with_tool_inspection, snapshot_id, snapshot_index_uri
+from ooh.agent.tool_inspection import (
+    context_pack_with_tool_inspection,
+    snapshot_id,
+    snapshot_index_uri,
+)
 from ooh.agent.test_generation import (
     GeneratedTestAgentLoop,
-    GeneratedTestEvidenceError,
-    GeneratedTestLoopTurn,
-    GeneratedTestPayloadError,
 )
 from ooh.agent.tools import (
     AgentTraceToolRecorder,
@@ -33,6 +34,7 @@ from ooh.agent.tools import (
     ToolExecutor,
 )
 from ooh.db.models import (
+    AgentActivity,
     AgentArtifactRead,
     AgentArtifactType,
     AgentRunRead,
@@ -68,7 +70,7 @@ class GeneratedTestRunResult:
 PLAN_STEP_SEQUENCE_BASE = 10
 TOOL_CALL_SEQUENCE_BASE = 1_000
 CONTEXT_PACK_SEQUENCE_STRIDE = 1_000_000
-GENERATION_STEP_SEQUENCE = 10_000_000
+GENERATION_STEP_SEQUENCE = 1
 PERSIST_STEP_SEQUENCE = 20_000_000
 
 
@@ -93,11 +95,16 @@ class GeneratedTestRunService:
         self.max_prompt_bytes = max_prompt_bytes
         self.max_tool_observation_bytes = max_tool_observation_bytes
         self.max_loop_duration_seconds = max_loop_duration_seconds
+        self.tracer = AgentExecutionTracer(
+            agent_trace_repo=agent_trace_repo,
+            artifact_store=artifact_store,
+        )
         self.agent_loop = GeneratedTestAgentLoop(
             provider,
             model=model,
             max_prompt_bytes=max_prompt_bytes,
             max_tool_observation_bytes=max_tool_observation_bytes,
+            tracer=self.tracer,
         )
         self.tool_executor = ToolExecutor(
             recorder=AgentTraceToolRecorder(
@@ -111,6 +118,7 @@ class GeneratedTestRunService:
             tool_executor=self.tool_executor,
             max_prompt_bytes=max_prompt_bytes,
             max_tool_observation_bytes=max_tool_observation_bytes,
+            tracer=self.tracer,
         )
 
     def generate_for_context_packs(
@@ -191,7 +199,11 @@ class GeneratedTestRunService:
                 output_summary={"generated_candidate_count": len(generated_test_inputs)},
             )
 
-            persist_step = self._create_persist_step(agent_run.id, generated_test_inputs)
+            persist_step = self._create_persist_step(
+                agent_run.id,
+                generated_test_inputs,
+                parent_step_id=generation_step.id,
+            )
             generated_tests = self.generated_test_repo.create_many(generated_test_inputs)
             persist_step = self.agent_trace_repo.mark_step_finished(
                 persist_step.id,
@@ -200,7 +212,9 @@ class GeneratedTestRunService:
             )
         except Exception:
             if generation_step is not None and generation_step.status != AgentStatus.SUCCEEDED:
-                self.agent_trace_repo.mark_step_finished(generation_step.id, status=AgentStatus.FAILED)
+                self.agent_trace_repo.mark_step_finished(
+                    generation_step.id, status=AgentStatus.FAILED
+                )
             if persist_step is not None and persist_step.status != AgentStatus.SUCCEEDED:
                 self.agent_trace_repo.mark_step_finished(persist_step.id, status=AgentStatus.FAILED)
             self.agent_trace_repo.mark_run_finished(agent_run.id, status=AgentStatus.FAILED)
@@ -227,34 +241,36 @@ class GeneratedTestRunService:
     ) -> GeneratedTestInput:
         deadline = LoopDeadline.start(self.max_loop_duration_seconds)
         context_pack_payload = self._read_context_pack(context_pack.context_pack.artifact_uri)
-        context_pack_payload = self._inspect_context_pack(
+        context_pack_payload, generation_parent_step_id = self._inspect_context_pack(
             agent_run_id=agent_run_id,
+            generation_step_id=generation_step.id,
             context_pack_id=context_pack.context_pack.id,
             context_pack_payload=context_pack_payload,
             context_pack_index=context_pack_index,
             deadline=deadline,
         )
-        try:
-            loop_result = self.agent_loop.run(context_pack_payload, deadline=deadline)
-        except (GeneratedTestPayloadError, GeneratedTestEvidenceError) as exc:
-            if exc.turns:
-                self._write_turn_artifacts(
-                    agent_run_id=agent_run_id,
-                    generation_step_id=generation_step.id,
-                    context_pack_id=context_pack.context_pack.id,
-                    turns=exc.turns,
-                )
-            raise
-        prompt_artifact = self._write_turn_artifacts(
-            agent_run_id=agent_run_id,
-            generation_step_id=generation_step.id,
-            context_pack_id=context_pack.context_pack.id,
-            turns=loop_result.turns,
+        sequence_base = context_pack_index * CONTEXT_PACK_SEQUENCE_STRIDE
+        loop_result = self.agent_loop.run(
+            context_pack_payload,
+            deadline=deadline,
+            trace_branch=TraceBranch(
+                agent_run_id=agent_run_id,
+                parent_step_id=generation_parent_step_id,
+                context_pack_id=context_pack.context_pack.id,
+                sequence_base=sequence_base,
+                artifact_prefix=f"{context_pack.context_pack.id}-generation",
+            ),
         )
+        final_turn = loop_result.turns[-1]
+        if final_turn.model_trace is None or final_turn.model_trace.prompt_artifact is None:
+            raise RuntimeError("generation model call did not record its prompt artifact")
+        if final_turn.evidence_trace is None:
+            raise RuntimeError("generation loop did not record its evidence verification step")
+        prompt_artifact = final_turn.model_trace.prompt_artifact
         normalized_payload = loop_result.payload
         validated_artifact = self._write_validated_output_artifact(
             agent_run_id=agent_run_id,
-            generation_step_id=generation_step.id,
+            evidence_step_id=final_turn.evidence_trace.step.id,
             context_pack_id=context_pack.context_pack.id,
             payload=normalized_payload,
         )
@@ -277,175 +293,11 @@ class GeneratedTestRunService:
             prompt_version=loop_result.prompt_version,
         )
 
-    def _write_turn_artifacts(
-        self,
-        *,
-        agent_run_id: UUID,
-        generation_step_id: UUID,
-        context_pack_id: UUID,
-        turns: list[GeneratedTestLoopTurn],
-    ) -> AgentArtifactRead:
-        prompt_artifact: AgentArtifactRead | None = None
-        for turn in turns:
-            prompt_artifact = self._write_prompt_artifact(
-                agent_run_id=agent_run_id,
-                generation_step_id=generation_step_id,
-                context_pack_id=context_pack_id,
-                turn=turn,
-                request_payload={
-                    "model": turn.request.model,
-                    "messages": [
-                        {"role": message.role, "content": message.content}
-                        for message in turn.request.messages
-                    ],
-                    "response_format": turn.request.response_format,
-                    "response_schema": turn.request.response_schema,
-                    "temperature": turn.request.temperature,
-                    "metadata": turn.request.metadata,
-                },
-            )
-            self._write_raw_response_artifact(
-                agent_run_id=agent_run_id,
-                generation_step_id=generation_step_id,
-                context_pack_id=context_pack_id,
-                turn=turn,
-                response_payload={
-                    "model": turn.model_response.model,
-                    "content": turn.model_response.content,
-                    "finish_reason": turn.model_response.finish_reason,
-                    "raw_response": turn.model_response.raw_response,
-                    "validation_error": turn.validation_error,
-                    "evidence_error": turn.evidence_error,
-                    "evidence_result": (
-                        turn.evidence_result.to_dict() if turn.evidence_result is not None else None
-                    ),
-                },
-            )
-            if turn.validation_error is not None:
-                self._write_validation_error_artifact(
-                    agent_run_id=agent_run_id,
-                    generation_step_id=generation_step_id,
-                    context_pack_id=context_pack_id,
-                    turn=turn,
-                )
-            if turn.evidence_error is not None:
-                self._write_evidence_error_artifact(
-                    agent_run_id=agent_run_id,
-                    generation_step_id=generation_step_id,
-                    context_pack_id=context_pack_id,
-                    turn=turn,
-                )
-
-        if prompt_artifact is None:
-            raise ValueError("agent loop produced no turns")
-        return prompt_artifact
-
-    def _write_prompt_artifact(
-        self,
-        *,
-        agent_run_id: UUID,
-        generation_step_id: UUID,
-        context_pack_id: UUID,
-        turn: GeneratedTestLoopTurn,
-        request_payload: dict[str, Any],
-    ) -> AgentArtifactRead:
-        stored_artifact = self.artifact_store.write_json(
-            agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-prompt.json",
-            payload=request_payload,
-        )
-        return self.agent_trace_repo.create_artifact(
-            AgentArtifactInput(
-                agent_step_id=generation_step_id,
-                artifact_type=AgentArtifactType.PROMPT,
-                artifact_uri=stored_artifact.artifact_uri,
-                content_hash=stored_artifact.content_hash,
-            )
-        )
-
-    def _write_raw_response_artifact(
-        self,
-        *,
-        agent_run_id: UUID,
-        generation_step_id: UUID,
-        context_pack_id: UUID,
-        turn: GeneratedTestLoopTurn,
-        response_payload: dict[str, Any],
-    ) -> AgentArtifactRead:
-        stored_artifact = self.artifact_store.write_json(
-            agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-raw-response.json",
-            payload=response_payload,
-        )
-        return self.agent_trace_repo.create_artifact(
-            AgentArtifactInput(
-                agent_step_id=generation_step_id,
-                artifact_type=AgentArtifactType.RAW_MODEL_RESPONSE,
-                artifact_uri=stored_artifact.artifact_uri,
-                content_hash=stored_artifact.content_hash,
-            )
-        )
-
-    def _write_validation_error_artifact(
-        self,
-        *,
-        agent_run_id: UUID,
-        generation_step_id: UUID,
-        context_pack_id: UUID,
-        turn: GeneratedTestLoopTurn,
-    ) -> AgentArtifactRead:
-        stored_artifact = self.artifact_store.write_json(
-            agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-validation-error.json",
-            payload={
-                "turn_sequence": turn.sequence,
-                "action": turn.action,
-                "validation_error": turn.validation_error,
-            },
-        )
-        return self.agent_trace_repo.create_artifact(
-            AgentArtifactInput(
-                agent_step_id=generation_step_id,
-                artifact_type=AgentArtifactType.TRACE,
-                artifact_uri=stored_artifact.artifact_uri,
-                content_hash=stored_artifact.content_hash,
-            )
-        )
-
-    def _write_evidence_error_artifact(
-        self,
-        *,
-        agent_run_id: UUID,
-        generation_step_id: UUID,
-        context_pack_id: UUID,
-        turn: GeneratedTestLoopTurn,
-    ) -> AgentArtifactRead:
-        stored_artifact = self.artifact_store.write_json(
-            agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-turn-{turn.sequence}-{turn.action}-evidence-error.json",
-            payload={
-                "turn_sequence": turn.sequence,
-                "action": turn.action,
-                "evidence_error": turn.evidence_error,
-                "evidence_result": (
-                    turn.evidence_result.to_dict() if turn.evidence_result is not None else None
-                ),
-            },
-        )
-        return self.agent_trace_repo.create_artifact(
-            AgentArtifactInput(
-                agent_step_id=generation_step_id,
-                artifact_type=AgentArtifactType.TRACE,
-                artifact_uri=stored_artifact.artifact_uri,
-                content_hash=stored_artifact.content_hash,
-            )
-        )
-
     def _write_validated_output_artifact(
         self,
         *,
         agent_run_id: UUID,
-        generation_step_id: UUID,
+        evidence_step_id: UUID,
         context_pack_id: UUID,
         payload: dict[str, Any],
     ) -> AgentArtifactRead:
@@ -456,7 +308,7 @@ class GeneratedTestRunService:
         )
         return self.agent_trace_repo.create_artifact(
             AgentArtifactInput(
-                agent_step_id=generation_step_id,
+                agent_step_id=evidence_step_id,
                 artifact_type=AgentArtifactType.VALIDATED_OUTPUT,
                 artifact_uri=stored_artifact.artifact_uri,
                 content_hash=stored_artifact.content_hash,
@@ -522,35 +374,45 @@ class GeneratedTestRunService:
                 input_summary={"context_pack_count": len(context_packs)},
             )
         )
-        return self.agent_trace_repo.mark_step_running(step.id)
+        return self.agent_trace_repo.mark_step_running(
+            step.id,
+            activity=AgentActivity.PLANNING,
+        )
 
     def _create_persist_step(
         self,
         agent_run_id: UUID,
         generated_test_inputs: list[GeneratedTestInput],
+        *,
+        parent_step_id: UUID,
     ) -> AgentStepRead:
         step = self.agent_trace_repo.create_step(
             AgentStepInput(
                 agent_run_id=agent_run_id,
                 step_type=AgentStepType.PERSIST_RESULT,
                 sequence=PERSIST_STEP_SEQUENCE,
+                parent_step_id=parent_step_id,
                 input_summary={"generated_candidate_count": len(generated_test_inputs)},
             )
         )
-        return self.agent_trace_repo.mark_step_running(step.id)
+        return self.agent_trace_repo.mark_step_running(
+            step.id,
+            activity=AgentActivity.PERSISTING,
+        )
 
     def _inspect_context_pack(
         self,
         *,
         agent_run_id: UUID,
+        generation_step_id: UUID,
         context_pack_id: UUID,
         context_pack_payload: dict[str, Any],
         context_pack_index: int,
         deadline: LoopDeadline,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], UUID]:
         index_uri = snapshot_index_uri(context_pack_payload)
         if index_uri is None:
-            return context_pack_payload
+            return context_pack_payload, generation_step_id
 
         tool_context = RepositoryToolContext.from_index_uri(
             index_uri,
@@ -562,6 +424,7 @@ class GeneratedTestRunService:
             context_pack_id=context_pack_id,
             context_pack_payload=context_pack_payload,
             sequence=sequence_base + PLAN_STEP_SEQUENCE_BASE,
+            parent_step_id=generation_step_id,
         )
         try:
             result = self.repository_inspector.run(
@@ -570,11 +433,12 @@ class GeneratedTestRunService:
                 deadline=deadline,
                 agent_run_id=agent_run_id,
                 tool_sequence_base=sequence_base + TOOL_CALL_SEQUENCE_BASE,
-                on_turn=lambda turn: self._write_inspection_turn_artifacts(
+                trace_branch=TraceBranch(
                     agent_run_id=agent_run_id,
-                    plan_step_id=plan_step.id,
+                    parent_step_id=plan_step.id,
                     context_pack_id=context_pack_id,
-                    turn=turn,
+                    sequence_base=sequence_base,
+                    artifact_prefix=f"{context_pack_id}-inspection",
                 ),
             )
         except Exception as exc:
@@ -591,9 +455,17 @@ class GeneratedTestRunService:
             output_summary=self._inspection_output_summary(result),
             warning_summary=self._inspection_warnings(result),
         )
-        return context_pack_with_tool_inspection(
-            context_pack_payload,
-            result.prompt_payload(max_bytes=self.max_tool_observation_bytes),
+        last_model_step_id = plan_step.id
+        if result.turns and result.turns[-1].model_trace is not None:
+            model_handle = result.turns[-1].model_trace.handle
+            if model_handle is not None:
+                last_model_step_id = model_handle.step.id
+        return (
+            context_pack_with_tool_inspection(
+                context_pack_payload,
+                result.prompt_payload(max_bytes=self.max_tool_observation_bytes),
+            ),
+            last_model_step_id,
         )
 
     def _create_inspection_plan_step(
@@ -603,12 +475,15 @@ class GeneratedTestRunService:
         context_pack_id: UUID,
         context_pack_payload: dict[str, Any],
         sequence: int,
+        parent_step_id: UUID,
     ) -> AgentStepRead:
         step = self.agent_trace_repo.create_step(
             AgentStepInput(
                 agent_run_id=agent_run_id,
                 step_type=AgentStepType.BUILD_TEST_PLAN,
                 sequence=sequence,
+                parent_step_id=parent_step_id,
+                context_pack_id=context_pack_id,
                 input_summary={
                     "context_pack_id": str(context_pack_id),
                     "pack_type": context_pack_payload.get("pack_type"),
@@ -618,83 +493,9 @@ class GeneratedTestRunService:
                 },
             )
         )
-        return self.agent_trace_repo.mark_step_running(step.id)
-
-    def _write_inspection_turn_artifacts(
-        self,
-        *,
-        agent_run_id: UUID,
-        plan_step_id: UUID,
-        context_pack_id: UUID,
-        turn: RepositoryInspectionTurn,
-    ) -> None:
-        prompt = self.artifact_store.write_json(
-            agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-inspection-turn-{turn.sequence}-prompt.json",
-            payload={
-                "model": turn.request.model,
-                "messages": [
-                    {
-                        "role": message.role,
-                        "content": message.content,
-                        "tool_name": message.tool_name,
-                        "tool_calls": [
-                            {
-                                "call_id": tool_call.call_id,
-                                "name": tool_call.name,
-                                "arguments": tool_call.arguments,
-                            }
-                            for tool_call in message.tool_calls
-                        ],
-                    }
-                    for message in turn.request.messages
-                ],
-                "tools": [
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.parameters,
-                    }
-                    for tool in turn.request.tools
-                ],
-                "timeout_seconds": turn.request.timeout_seconds,
-                "metadata": turn.request.metadata,
-            },
-        )
-        self.agent_trace_repo.create_artifact(
-            AgentArtifactInput(
-                agent_step_id=plan_step_id,
-                artifact_type=AgentArtifactType.PROMPT,
-                artifact_uri=prompt.artifact_uri,
-                content_hash=prompt.content_hash,
-            )
-        )
-
-        raw_response = self.artifact_store.write_json(
-            agent_run_id=agent_run_id,
-            file_name=f"{context_pack_id}-inspection-turn-{turn.sequence}-raw-response.json",
-            payload={
-                "model": turn.model_response.model,
-                "content": turn.model_response.content,
-                "finish_reason": turn.model_response.finish_reason,
-                "tool_calls": [
-                    {
-                        "call_id": tool_call.call_id,
-                        "name": tool_call.name,
-                        "arguments": tool_call.arguments,
-                    }
-                    for tool_call in turn.model_response.tool_calls
-                ],
-                "raw_response": turn.model_response.raw_response,
-            },
-        )
-        self.agent_trace_repo.create_artifact(
-            AgentArtifactInput(
-                agent_step_id=plan_step_id,
-                artifact_type=AgentArtifactType.RAW_MODEL_RESPONSE,
-                artifact_uri=raw_response.artifact_uri,
-                content_hash=raw_response.content_hash,
-            )
+        return self.agent_trace_repo.mark_step_running(
+            step.id,
+            activity=AgentActivity.PLANNING,
         )
 
     @staticmethod
