@@ -10,8 +10,17 @@ from ooh.db.repos.attention_profiles import (
     AttentionProfileRepo,
     AttentionProfileWithFocusAreas,
 )
-from ooh.db.repos.context_packs import ContextPackRepo, ContextPackSourceInput, ContextPackWithSources
+from ooh.db.repos.context_packs import (
+    ContextPackRepo,
+    ContextPackSourceInput,
+    ContextPackWithSources,
+)
 from ooh.db.repos.drift_events import DriftEventRepo
+from ooh.db.repos.execution_events import (
+    ExecutionEventInput,
+    ExecutionEventRepo,
+    append_execution_event,
+)
 from ooh.db.repos.generated_tests import GeneratedTestInput, GeneratedTestRepo
 from ooh.db.repos.guidance_sources import GuidanceSourceRepo
 from ooh.db.repos.jobs import JobRepo
@@ -33,6 +42,8 @@ __all__ = [
     "ContextPackSourceInput",
     "ContextPackWithSources",
     "DriftEventRepo",
+    "ExecutionEventInput",
+    "ExecutionEventRepo",
     "GeneratedTestInput",
     "GeneratedTestRepo",
     "GuidanceSourceRepo",
@@ -46,4 +57,5 @@ __all__ = [
     "TestAnswerRepo",
     "TestResultInput",
     "TestResultRepo",
+    "append_execution_event",
 ]

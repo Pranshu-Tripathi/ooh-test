@@ -8,6 +8,7 @@ from ooh.db.models.context_pack_sources import ContextPackSource, ContextPackSou
 from ooh.db.models.context_packs import ContextPack, ContextPackRead
 from ooh.db.models.drift_events import DriftEvent, DriftEventRead
 from ooh.db.models.enums import (
+    AgentActivity,
     AgentArtifactType,
     AgentRunType,
     AgentStepType,
@@ -15,6 +16,7 @@ from ooh.db.models.enums import (
     ContextPackSourceType,
     ContextPackType,
     DriftSeverity,
+    ExecutionEventType,
     GeneratedTestCategory,
     GuidanceSourceType,
     JobStatus,
@@ -25,6 +27,7 @@ from ooh.db.models.enums import (
     RepositoryStatus,
     TestResultStatus,
 )
+from ooh.db.models.execution_events import ExecutionEvent, ExecutionEventCursor, ExecutionEventRead
 from ooh.db.models.generated_tests import GeneratedTest, GeneratedTestRead
 from ooh.db.models.guidance_sources import GuidanceSource, GuidanceSourceRead
 from ooh.db.models.jobs import Job, JobRead
@@ -36,6 +39,7 @@ from ooh.db.models.test_answers import TestAnswer, TestAnswerRead
 from ooh.db.models.test_results import TestResult, TestResultRead
 
 __all__ = [
+    "AgentActivity",
     "AgentArtifact",
     "AgentArtifactRead",
     "AgentArtifactType",
@@ -60,6 +64,10 @@ __all__ = [
     "DriftEvent",
     "DriftEventRead",
     "DriftSeverity",
+    "ExecutionEvent",
+    "ExecutionEventCursor",
+    "ExecutionEventRead",
+    "ExecutionEventType",
     "GeneratedTest",
     "GeneratedTestCategory",
     "GeneratedTestRead",

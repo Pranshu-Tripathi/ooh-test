@@ -1,10 +1,12 @@
 import type {
   AgentArtifact,
   AgentRun,
+  AgentRunSnapshot,
   AgentStep,
   AttentionProfile,
   ContextPack,
   DriftEvent,
+  ExecutionEvent,
   GeneratedTest,
   Job,
   JobDetail,
@@ -84,6 +86,20 @@ export const api = {
   listAgentRuns: (repositoryId: string) =>
     request<AgentRun[]>(`/repositories/${repositoryId}/agent-runs`),
   getAgentRun: (agentRunId: string) => request<AgentRun>(`/agent-runs/${agentRunId}`),
+  getAgentRunSnapshot: (agentRunId: string) =>
+    request<AgentRunSnapshot>(`/agent-runs/${agentRunId}/snapshot`),
+  listAgentRunEvents: (agentRunId: string, afterEventId = 0) =>
+    request<ExecutionEvent[]>(
+      `/agent-runs/${agentRunId}/events?after_event_id=${encodeURIComponent(afterEventId)}`
+    ),
+  agentRunEventStreamUrl: (agentRunId: string, afterEventId = 0) =>
+    `/agent-runs/${agentRunId}/events/stream?after_event_id=${encodeURIComponent(afterEventId)}`,
+  listRepositoryEvents: (repositoryId: string, afterEventId = 0) =>
+    request<ExecutionEvent[]>(
+      `/repositories/${repositoryId}/events?after_event_id=${encodeURIComponent(afterEventId)}`
+    ),
+  repositoryEventStreamUrl: (repositoryId: string, afterEventId = 0) =>
+    `/repositories/${repositoryId}/events/stream?after_event_id=${encodeURIComponent(afterEventId)}`,
   listAgentSteps: (agentRunId: string) =>
     request<AgentStep[]>(`/agent-runs/${agentRunId}/steps`),
   listAgentArtifacts: (agentStepId: string) =>

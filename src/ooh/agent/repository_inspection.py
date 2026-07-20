@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from ooh.agent.execution_tracing import (
+    ExecutionTracer,
+    TraceBranch,
+    TraceNodeSpec,
+    TracedModelCall,
+    execute_model_call,
+)
 from ooh.agent.loop_runtime import LoopDeadline
 from ooh.agent.prompt_budget import (
     DEFAULT_GENERATION_PROMPT_MAX_BYTES,
@@ -27,8 +34,10 @@ from ooh.agent.tool_inspection import (
     inspection_prompt_payload,
 )
 from ooh.agent.tools import RepoToolError, RepositoryToolContext, ToolExecution, ToolExecutor
+from ooh.db.models import AgentActivity, AgentStepType
 
 INSPECTION_PROMPT_VERSION = "repository-inspection-v1"
+INSPECTION_MODEL_CALL_SEQUENCE_BASE = 100
 
 
 @dataclass(frozen=True)
@@ -36,6 +45,7 @@ class RepositoryInspectionTurn:
     sequence: int
     request: ModelRequest
     model_response: ModelResponse
+    model_trace: TracedModelCall | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,7 @@ class ModelDirectedRepositoryInspector:
         tool_executor: ToolExecutor,
         max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
         max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+        tracer: ExecutionTracer | None = None,
     ) -> None:
         if max_prompt_bytes < 4_000:
             raise ValueError("max_prompt_bytes must be at least 4000")
@@ -78,6 +89,7 @@ class ModelDirectedRepositoryInspector:
         self.tool_executor = tool_executor
         self.max_prompt_bytes = max_prompt_bytes
         self.max_tool_observation_bytes = max_tool_observation_bytes
+        self.tracer = tracer
         self.model_tools = [
             ModelToolDefinition(
                 name=descriptor.name,
@@ -96,6 +108,7 @@ class ModelDirectedRepositoryInspector:
         agent_run_id: UUID | None = None,
         tool_sequence_base: int = 0,
         on_turn: InspectionTurnObserver | None = None,
+        trace_branch: TraceBranch | None = None,
     ) -> RepositoryInspectionResult:
         turns: list[RepositoryInspectionTurn] = []
         executions: list[ToolExecution] = []
@@ -103,6 +116,12 @@ class ModelDirectedRepositoryInspector:
         duplicate_calls: list[DuplicateToolCall] = []
         seen_signatures: set[str] = set()
         requested_call_count = 0
+        next_parent_step_id = trace_branch.parent_step_id if trace_branch is not None else None
+        next_trace_sequence = (
+            trace_branch.sequence_base + INSPECTION_MODEL_CALL_SEQUENCE_BASE
+            if trace_branch is not None
+            else 0
+        )
 
         while True:
             remaining_seconds = deadline.remaining_seconds(
@@ -116,12 +135,35 @@ class ModelDirectedRepositoryInspector:
                 duplicate_calls=duplicate_calls,
                 timeout_seconds=remaining_seconds,
             )
-            response = self.provider.generate(request)
+            turn_sequence = len(turns) + 1
+            model_step_sequence = next_trace_sequence
+            next_trace_sequence += 1
+            model_trace = execute_model_call(
+                provider=self.provider,
+                request=request,
+                tracer=self.tracer,
+                spec=(
+                    TraceNodeSpec(
+                        branch=trace_branch,
+                        step_type=AgentStepType.MODEL_CALL,
+                        sequence=model_step_sequence,
+                        iteration=turn_sequence,
+                        activity=AgentActivity.WAITING_ON_MODEL,
+                        action="inspect_repository",
+                        parent_step_id=next_parent_step_id,
+                        input_summary={"phase": "repository_inspection"},
+                    )
+                    if trace_branch is not None
+                    else None
+                ),
+            )
+            response = model_trace.response
             deadline.remaining_seconds(action="processing repository inspection tool calls")
             turn = RepositoryInspectionTurn(
-                sequence=len(turns) + 1,
+                sequence=turn_sequence,
                 request=request,
                 model_response=response,
+                model_trace=model_trace,
             )
             turns.append(turn)
             if on_turn is not None:
@@ -136,9 +178,20 @@ class ModelDirectedRepositoryInspector:
                     completion_reason="model_finished",
                 )
 
+            tool_parent_step_id = (
+                model_trace.handle.step.id
+                if model_trace.handle is not None
+                else next_parent_step_id
+            )
             for response_call in response.tool_calls:
                 deadline.remaining_seconds(action=f"executing {response_call.name}")
                 requested_call_count += 1
+                tool_step_sequence = (
+                    next_trace_sequence
+                    if trace_branch is not None
+                    else tool_sequence_base + requested_call_count
+                )
+                next_trace_sequence += 1
                 call_id = response_call.call_id or (
                     f"inspect-{turn.sequence}-{requested_call_count}"
                 )
@@ -166,12 +219,17 @@ class ModelDirectedRepositoryInspector:
                     self._record_failed_execution(
                         tool_context=tool_context,
                         agent_run_id=agent_run_id,
-                        sequence=tool_sequence_base + requested_call_count,
+                        sequence=tool_step_sequence,
                         call_id=call_id,
                         tool_name=response_call.name,
                         arguments=response_call.arguments,
                         error=exc,
                         failed_calls=failed_calls,
+                        parent_step_id=tool_parent_step_id,
+                        context_pack_id=(
+                            trace_branch.context_pack_id if trace_branch is not None else None
+                        ),
+                        iteration=turn_sequence,
                     )
                     continue
 
@@ -197,8 +255,13 @@ class ModelDirectedRepositoryInspector:
                         context=tool_context,
                         arguments=canonical_arguments,
                         agent_run_id=agent_run_id,
-                        sequence=tool_sequence_base + requested_call_count,
+                        sequence=tool_step_sequence,
                         call_id=call_id,
+                        parent_step_id=tool_parent_step_id,
+                        context_pack_id=(
+                            trace_branch.context_pack_id if trace_branch is not None else None
+                        ),
+                        iteration=turn_sequence,
                     )
                 except RepoToolError as exc:
                     failed_calls.append(
@@ -212,6 +275,9 @@ class ModelDirectedRepositoryInspector:
                     )
                     continue
                 executions.append(execution)
+                if execution.agent_step_id is not None:
+                    tool_parent_step_id = execution.agent_step_id
+            next_parent_step_id = tool_parent_step_id
 
     def _build_request(
         self,
@@ -248,10 +314,13 @@ class ModelDirectedRepositoryInspector:
         user_prefix = "Repository briefing:\n"
         history_prefix = "\n\nInspection history:\n"
         tool_schema_bytes = model_tools_size_bytes(self.model_tools)
-        fixed_bytes = sum(
-            len(value.encode("utf-8"))
-            for value in (system_content, user_prefix, history_prefix, history_text)
-        ) + tool_schema_bytes
+        fixed_bytes = (
+            sum(
+                len(value.encode("utf-8"))
+                for value in (system_content, user_prefix, history_prefix, history_text)
+            )
+            + tool_schema_bytes
+        )
         context_max_bytes = self.max_prompt_bytes - fixed_bytes
         if context_max_bytes < 1_000:
             raise ValueError(
@@ -263,8 +332,7 @@ class ModelDirectedRepositoryInspector:
             tool_observation_max_bytes=self.max_tool_observation_bytes,
         )
         user_content = (
-            f"{user_prefix}{serialize_prompt_context(context_view)}"
-            f"{history_prefix}{history_text}"
+            f"{user_prefix}{serialize_prompt_context(context_view)}{history_prefix}{history_text}"
         )
         prompt_bytes = (
             len(system_content.encode("utf-8"))
@@ -317,6 +385,9 @@ class ModelDirectedRepositoryInspector:
         arguments: dict[str, Any],
         error: RepoToolError,
         failed_calls: list[FailedToolCall],
+        parent_step_id: UUID | None,
+        context_pack_id: UUID | None,
+        iteration: int,
     ) -> None:
         try:
             self.tool_executor.execute(
@@ -326,6 +397,9 @@ class ModelDirectedRepositoryInspector:
                 agent_run_id=agent_run_id,
                 sequence=sequence,
                 call_id=call_id,
+                parent_step_id=parent_step_id,
+                context_pack_id=context_pack_id,
+                iteration=iteration,
             )
         except RepoToolError:
             pass

@@ -3,6 +3,7 @@ import {
   AlertCircle,
   Boxes,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CircleDashed,
   Clock3,
@@ -20,10 +21,28 @@ import {
   RefreshCw,
   Send,
   Settings,
+  X,
   XCircle
 } from "lucide-react";
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  Handle,
+  MarkerType,
+  MiniMap,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
+  type Edge,
+  type Node,
+  type NodeProps
+} from "@xyflow/react";
+import ELK from "elkjs/lib/elk.bundled.js";
+import type { ElkNode } from "elkjs/lib/elk-api";
 import type { DependencyList, FormEvent, ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "./api";
 import type {
@@ -33,6 +52,7 @@ import type {
   AttentionProfile,
   ContextPack,
   DriftEvent,
+  ExecutionEvent,
   GeneratedTest,
   Job,
   JobDetail,
@@ -58,6 +78,28 @@ type AsyncState<T> = {
 };
 
 type ArtifactsByStepId = Record<string, AgentArtifact[]>;
+type TraceConnection = "idle" | "connecting" | "live" | "reconnecting" | "complete";
+
+type LiveTraceState = {
+  run: AgentRun | null;
+  steps: AgentStep[];
+  artifactsByStepId: ArtifactsByStepId;
+  lastEventId: number;
+  loading: boolean;
+  error: string | null;
+  connection: TraceConnection;
+};
+
+const TRACE_EVENT_TYPES = [
+  "run_created",
+  "run_status_changed",
+  "step_created",
+  "step_status_changed",
+  "step_activity_changed",
+  "artifact_created"
+] as const;
+
+const TERMINAL_AGENT_STATUSES = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
 
 const PACK_TYPES = [
   "high_level_design",
@@ -574,8 +616,11 @@ function AgentRunsTab({ runs }: { runs: AsyncState<AgentRun[]> & { reload: () =>
         {latestRunId ? (
           <TracePreview
             artifactsByStepId={latestTrace.artifactsByStepId}
-            loading={latestTrace.steps.loading || latestTrace.artifactsByStepId.loading}
-            steps={latestTrace.steps.data ?? []}
+            connection={latestTrace.connection}
+            error={latestTrace.error}
+            loading={latestTrace.loading}
+            onSelectStep={() => navigate(`/agent-runs/${latestRunId}`)}
+            steps={latestTrace.steps}
           />
         ) : (
           <div className="empty-state">No agent runs</div>
@@ -608,18 +653,18 @@ function TracePreview({
   steps,
   artifactsByStepId,
   loading,
+  error,
+  connection,
   selectedStepId,
-  selectedArtifactId,
-  onSelectStep,
-  onSelectArtifact
+  onSelectStep
 }: {
   steps: AgentStep[];
-  artifactsByStepId: AsyncState<ArtifactsByStepId>;
+  artifactsByStepId: ArtifactsByStepId;
   loading: boolean;
+  error: string | null;
+  connection: TraceConnection;
   selectedStepId?: string | null;
-  selectedArtifactId?: string | null;
   onSelectStep?: (stepId: string) => void;
-  onSelectArtifact?: (stepId: string, artifactId: string) => void;
 }) {
   if (loading && steps.length === 0) {
     return (
@@ -629,15 +674,14 @@ function TracePreview({
       </div>
     );
   }
-  if (artifactsByStepId.error) {
-    return <InlineError message={artifactsByStepId.error} />;
+  if (error && steps.length === 0) {
+    return <InlineError message={error} />;
   }
   return (
     <TraceGraph
-      artifactsByStepId={artifactsByStepId.data ?? {}}
-      onSelectArtifact={onSelectArtifact}
+      artifactsByStepId={artifactsByStepId}
+      connection={connection}
       onSelectStep={onSelectStep}
-      selectedArtifactId={selectedArtifactId}
       selectedStepId={selectedStepId}
       steps={steps}
     />
@@ -647,80 +691,703 @@ function TracePreview({
 function TraceGraph({
   steps,
   artifactsByStepId,
+  connection,
   selectedStepId,
-  selectedArtifactId,
-  onSelectStep,
-  onSelectArtifact
+  onSelectStep
 }: {
   steps: AgentStep[];
   artifactsByStepId: ArtifactsByStepId;
+  connection: TraceConnection;
   selectedStepId?: string | null;
-  selectedArtifactId?: string | null;
   onSelectStep?: (stepId: string) => void;
-  onSelectArtifact?: (stepId: string, artifactId: string) => void;
 }) {
+  const [expandedSuccessfulGroups, setExpandedSuccessfulGroups] = useState<Set<string>>(
+    () => new Set()
+  );
   const artifactCount = Object.values(artifactsByStepId).reduce(
     (count, artifacts) => count + artifacts.length,
     0
   );
-  const modelCallCount = Object.values(artifactsByStepId)
-    .flat()
-    .filter((artifact) => isModelResponseArtifact(artifact)).length;
+  const modelCallCount = steps.filter((step) => step.step_type === "model_call").length;
+  const toolCallCount = steps.filter((step) => step.step_type === "tool_call").length;
+
+  const toggleSuccessfulGroup = useCallback((contextPackId: string) => {
+    setExpandedSuccessfulGroups((current) => {
+      const next = new Set(current);
+      if (next.has(contextPackId)) {
+        next.delete(contextPackId);
+      } else {
+        next.add(contextPackId);
+      }
+      return next;
+    });
+  }, []);
 
   return (
     <div className="trace-graph-wrap">
       <div className="trace-legend">
+        <TraceConnectionIndicator connection={connection} />
         <span>{steps.length} steps</span>
         <span>{modelCallCount} LLM calls</span>
+        <span>{toolCallCount} tool calls</span>
         <span>{artifactCount} artifacts</span>
       </div>
-      <div className="trace-graph">
-        {steps.map((step) => {
-          const artifacts = artifactsByStepId[step.id] ?? [];
-          return (
-            <div className="trace-lane" key={step.id}>
-              <button
-                className={`trace-node step-node ${selectedStepId === step.id ? "active" : ""}`}
-                onClick={() => onSelectStep?.(step.id)}
-                type="button"
-              >
-                <span className={`node-dot ${statusTone(step.status)}`} />
-                <span className="node-kind">{stepNodeKind(step)} · {step.sequence}</span>
-                <strong>{stepNodeTitle(step)}</strong>
-                {stepNodeDetail(step) ? <span className="step-detail">{stepNodeDetail(step)}</span> : null}
-                <StatusPill status={step.status} />
-              </button>
-              <div className="artifact-chain">
-                {artifacts.length === 0 ? (
-                  <div className="trace-empty">No artifacts recorded</div>
-                ) : (
-                  artifacts.map((artifact) => (
-                    <button
-                      className={[
-                        "trace-node",
-                        "artifact-node",
-                        artifactClass(artifact),
-                        selectedArtifactId === artifact.id ? "active" : ""
-                      ].join(" ")}
-                      key={artifact.id}
-                      onClick={() => onSelectArtifact?.(step.id, artifact.id)}
-                      type="button"
-                    >
-                      {artifactIcon(artifact)}
-                      <span className="node-kind">{artifactLabel(artifact)}</span>
-                      <strong>{artifactNodeTitle(artifact)}</strong>
-                      <code>{shortSha(artifact.content_hash)}</code>
-                    </button>
-                  ))
-                )}
-              </div>
-            </div>
-          );
-        })}
-        {steps.length === 0 ? <div className="empty-state">No steps</div> : null}
-      </div>
+      <ReactFlowProvider>
+        <TraceFlowCanvas
+          artifactsByStepId={artifactsByStepId}
+          expandedSuccessfulGroups={expandedSuccessfulGroups}
+          onSelectStep={onSelectStep}
+          onToggleGroup={toggleSuccessfulGroup}
+          selectedStepId={selectedStepId}
+          steps={steps}
+        />
+      </ReactFlowProvider>
     </div>
   );
+}
+
+const TRACE_STEP_WIDTH = 320;
+const TRACE_STEP_HEIGHT = 112;
+const TRACE_GROUP_MIN_WIDTH = 420;
+const TRACE_GROUP_HEADER_HEIGHT = 76;
+const TRACE_GROUP_GAP = 92;
+const traceElk = new ELK();
+
+type TraceStepNodeData = {
+  [key: string]: unknown;
+  step: AgentStep;
+  artifactCount: number;
+  onSelectStep?: (stepId: string) => void;
+};
+
+type TraceGroupNodeData = {
+  [key: string]: unknown;
+  activity: string | null;
+  branchLabel: string | null;
+  collapsed: boolean;
+  collapsible: boolean;
+  contextPackId: string | null;
+  eyebrow: string;
+  nodeCount: number;
+  onToggle?: (contextPackId: string) => void;
+  status: string;
+  title: string;
+};
+
+type TraceStepFlowNodeType = Node<TraceStepNodeData, "traceStep">;
+type TraceGroupFlowNodeType = Node<TraceGroupNodeData, "traceGroup">;
+type TraceFlowNode = TraceStepFlowNodeType | TraceGroupFlowNodeType;
+
+type TraceStepLayout = {
+  height: number;
+  positions: Map<string, { x: number; y: number }>;
+  width: number;
+};
+
+type TraceFlowGroupBlock = {
+  collapsed: boolean;
+  data: TraceGroupNodeData;
+  groupId: string;
+  height: number;
+  layout: TraceStepLayout;
+  steps: AgentStep[];
+  width: number;
+};
+
+function TraceStepFlowNode({ data, selected }: NodeProps<TraceStepFlowNodeType>) {
+  const { step, artifactCount, onSelectStep } = data;
+  return (
+    <div className="trace-flow-step">
+      <Handle className="trace-flow-handle" position={Position.Top} type="target" />
+      <button
+        className={[
+          "flow-execution-card",
+          `status-${statusTone(step.status)}`,
+          step.status === "running" ? "running" : "",
+          selected ? "active" : ""
+        ].join(" ")}
+        onClick={() => onSelectStep?.(step.id)}
+        type="button"
+      >
+        <span className="execution-node-icon">{stepNodeIcon(step)}</span>
+        <span className="execution-node-copy">
+          <span className="node-kind">
+            {stepNodeKind(step)} · #{step.sequence}
+            {step.iteration ? ` · iteration ${step.iteration}` : ""}
+          </span>
+          <strong>{stepNodeTitle(step)}</strong>
+          <span className="step-detail">{stepNodeDetail(step) ?? stepStateSummary(step)}</span>
+        </span>
+        <span className="execution-node-meta">
+          {step.activity ? <span className="activity-label">{labelize(step.activity)}</span> : null}
+          <StatusPill status={step.status} />
+          <span>{formatStepDuration(step)}</span>
+          {artifactCount ? <span>{artifactCount} artifacts</span> : null}
+        </span>
+      </button>
+      <Handle className="trace-flow-handle" position={Position.Bottom} type="source" />
+    </div>
+  );
+}
+
+function TraceGroupFlowNode({ data }: NodeProps<TraceGroupFlowNodeType>) {
+  const content = (
+    <>
+      {data.collapsible ? (
+        <ChevronDown className={data.collapsed ? "collapsed" : ""} size={17} />
+      ) : (
+        <span className={`node-dot ${statusTone(data.status)}`} />
+      )}
+      <span className="trace-flow-group-copy">
+        <span className="eyebrow">{data.eyebrow}</span>
+        <strong>{data.title}</strong>
+        {data.branchLabel ? <small>{data.branchLabel}</small> : null}
+      </span>
+      <span className="trace-flow-group-state">
+        {data.activity ? <span>{labelize(data.activity)}</span> : null}
+        <StatusPill status={data.status} />
+        <span>{data.nodeCount} nodes</span>
+      </span>
+    </>
+  );
+
+  return (
+    <div
+      className={`trace-flow-group ${data.collapsed ? "collapsed" : "expanded"} status-${statusTone(data.status)}`}
+    >
+      <Handle className="trace-flow-handle" position={Position.Top} type="target" />
+      {data.collapsible ? (
+        <button
+          aria-expanded={!data.collapsed}
+          className="trace-flow-group-header nodrag"
+          onClick={() => data.contextPackId && data.onToggle?.(data.contextPackId)}
+          type="button"
+        >
+          {content}
+        </button>
+      ) : (
+        <div className="trace-flow-group-header">{content}</div>
+      )}
+      <Handle className="trace-flow-handle" position={Position.Bottom} type="source" />
+    </div>
+  );
+}
+
+const TRACE_NODE_TYPES = {
+  traceGroup: TraceGroupFlowNode,
+  traceStep: TraceStepFlowNode
+};
+
+function TraceFlowCanvas({
+  steps,
+  artifactsByStepId,
+  expandedSuccessfulGroups,
+  selectedStepId,
+  onSelectStep,
+  onToggleGroup
+}: {
+  steps: AgentStep[];
+  artifactsByStepId: ArtifactsByStepId;
+  expandedSuccessfulGroups: Set<string>;
+  selectedStepId?: string | null;
+  onSelectStep?: (stepId: string) => void;
+  onToggleGroup: (contextPackId: string) => void;
+}) {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const [nodes, setNodes] = useState<TraceFlowNode[]>([]);
+  const [edges, setEdges] = useState<Edge[]>([]);
+  const [layouting, setLayouting] = useState(steps.length > 0);
+  const [packColumnCount, setPackColumnCount] = useState(2);
+  const { fitView } = useReactFlow<TraceFlowNode, Edge>();
+  const lastFitSignature = useRef("");
+  const structureSignature = useMemo(
+    () =>
+      steps
+        .map(
+          (step) =>
+            `${step.id}:${step.parent_step_id ?? "root"}:${step.context_pack_id ?? "run"}:${step.status}`
+        )
+        .join("|") +
+      `|expanded:${[...expandedSuccessfulGroups].sort().join(",")}|columns:${packColumnCount}`,
+    [expandedSuccessfulGroups, packColumnCount, steps]
+  );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+    const updateColumnCount = (width: number) => {
+      setPackColumnCount(width >= 1420 ? 3 : width >= 760 ? 2 : 1);
+    };
+    updateColumnCount(canvas.clientWidth);
+    const observer = new ResizeObserver((entries) => {
+      updateColumnCount(entries[0]?.contentRect.width ?? canvas.clientWidth);
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let fitFrame = 0;
+    if (steps.length === 0) {
+      setNodes([]);
+      setEdges([]);
+      setLayouting(false);
+      return () => undefined;
+    }
+    setLayouting(true);
+    void buildTraceFlowElements({
+      artifactsByStepId,
+      expandedSuccessfulGroups,
+      onSelectStep,
+      onToggleGroup,
+      packColumnCount,
+      selectedStepId,
+      steps
+    }).then((elements) => {
+      if (!active) {
+        return;
+      }
+      setNodes(elements.nodes);
+      setEdges(elements.edges);
+      setLayouting(false);
+      if (lastFitSignature.current !== structureSignature) {
+        lastFitSignature.current = structureSignature;
+        fitFrame = window.requestAnimationFrame(() => {
+          void fitView({ duration: 360, maxZoom: 1, padding: 0.14 });
+        });
+      }
+    });
+    return () => {
+      active = false;
+      window.cancelAnimationFrame(fitFrame);
+    };
+  }, [
+    artifactsByStepId,
+    expandedSuccessfulGroups,
+    fitView,
+    onSelectStep,
+    onToggleGroup,
+    packColumnCount,
+    selectedStepId,
+    steps,
+    structureSignature
+  ]);
+
+  return (
+    <div className="trace-flow-canvas" ref={canvasRef}>
+      <ReactFlow<TraceFlowNode, Edge>
+        edges={edges}
+        edgesFocusable={false}
+        elementsSelectable={false}
+        fitView
+        maxZoom={1.5}
+        minZoom={0.2}
+        nodes={nodes}
+        nodesConnectable={false}
+        nodesDraggable={false}
+        nodesFocusable={false}
+        nodeTypes={TRACE_NODE_TYPES}
+        panOnScroll
+        proOptions={{ hideAttribution: false }}
+        zoomOnDoubleClick={false}
+      >
+        <Background color="#b8c7c1" gap={24} size={1.2} variant={BackgroundVariant.Dots} />
+        <MiniMap
+          nodeColor={(node) => {
+            if (node.type === "traceGroup") {
+              return "#c8d9d3";
+            }
+            return statusColor((node.data as TraceStepNodeData).step.status);
+          }}
+          pannable
+          zoomable
+        />
+        <Controls showInteractive={false} />
+      </ReactFlow>
+      {layouting ? (
+        <div className="trace-flow-layouting">
+          <CircleDashed className="spin" size={16} /> Arranging live trace
+        </div>
+      ) : null}
+      {steps.length === 0 ? <div className="trace-flow-empty">No steps</div> : null}
+    </div>
+  );
+}
+
+async function buildTraceFlowElements({
+  steps,
+  artifactsByStepId,
+  expandedSuccessfulGroups,
+  selectedStepId,
+  onSelectStep,
+  onToggleGroup,
+  packColumnCount
+}: {
+  steps: AgentStep[];
+  artifactsByStepId: ArtifactsByStepId;
+  expandedSuccessfulGroups: Set<string>;
+  selectedStepId?: string | null;
+  onSelectStep?: (stepId: string) => void;
+  onToggleGroup: (contextPackId: string) => void;
+  packColumnCount: number;
+}) {
+  const sortedSteps = [...steps].sort((left, right) => left.sequence - right.sequence);
+  const orchestrationSteps = sortedSteps.filter((step) => !step.context_pack_id);
+  const contextGroups = groupStepsByContextPack(sortedSteps);
+  const collapsedContextIds = new Set(
+    contextGroups
+      .filter(
+        (group) =>
+          group.steps.every((step) => step.status === "succeeded") &&
+          !expandedSuccessfulGroups.has(group.contextPackId)
+      )
+      .map((group) => group.contextPackId)
+  );
+  const layouts = new Map<string, TraceStepLayout>();
+  const layoutRequests: Promise<void>[] = [];
+
+  if (orchestrationSteps.length) {
+    layoutRequests.push(
+      layoutTraceSteps(orchestrationSteps).then((layout) => {
+        layouts.set("orchestration", layout);
+      })
+    );
+  }
+  contextGroups.forEach((group) => {
+    if (!collapsedContextIds.has(group.contextPackId)) {
+      layoutRequests.push(
+        layoutTraceSteps(group.steps).then((layout) => {
+          layouts.set(group.contextPackId, layout);
+        })
+      );
+    }
+  });
+  await Promise.all(layoutRequests);
+
+  const orchestrationLayout = layouts.get("orchestration") ?? emptyStepLayout();
+  const orchestrationBlock: TraceFlowGroupBlock | null = orchestrationSteps.length
+    ? {
+        collapsed: false,
+        data: {
+          activity: orchestrationSteps.find((step) => step.status === "running")?.activity ?? null,
+          branchLabel: null,
+          collapsed: false,
+          collapsible: false,
+          contextPackId: null,
+          eyebrow: "Run-level flow",
+          nodeCount: orchestrationSteps.length,
+          status: groupStatus(orchestrationSteps),
+          title: "Orchestration"
+        },
+        groupId: "trace-group-orchestration",
+        height: orchestrationLayout.height + TRACE_GROUP_HEADER_HEIGHT + 28,
+        layout: orchestrationLayout,
+        steps: orchestrationSteps,
+        width: Math.max(orchestrationLayout.width + 48, TRACE_GROUP_MIN_WIDTH)
+      }
+    : null;
+
+  const contextBlocks = contextGroups.map<TraceFlowGroupBlock>((group) => {
+    const successful = group.steps.every((step) => step.status === "succeeded");
+    const collapsed = collapsedContextIds.has(group.contextPackId);
+    const runningStep = group.steps.find((step) => step.status === "running");
+    const externalParent = findExternalParent(group.steps, sortedSteps);
+    const layout = layouts.get(group.contextPackId) ?? emptyStepLayout();
+    return {
+      collapsed,
+      data: {
+        activity: runningStep?.activity ?? null,
+        branchLabel: externalParent ? `Branches from ${stepNodeTitle(externalParent)}` : null,
+        collapsed,
+        collapsible: successful,
+        contextPackId: group.contextPackId,
+        eyebrow: `Context pack · ${shortId(group.contextPackId)}`,
+        nodeCount: group.steps.length,
+        onToggle: onToggleGroup,
+        status: successful ? "succeeded" : groupStatus(group.steps),
+        title: contextGroupTitle(group.steps)
+      },
+      groupId: contextFlowGroupId(group.contextPackId),
+      height: collapsed ? 106 : layout.height + TRACE_GROUP_HEADER_HEIGHT + 28,
+      layout,
+      steps: group.steps,
+      width: collapsed ? TRACE_GROUP_MIN_WIDTH : Math.max(layout.width + 48, TRACE_GROUP_MIN_WIDTH)
+    };
+  });
+  const blockPositions = layoutTraceGroupBlocks(
+    orchestrationBlock,
+    contextBlocks,
+    sortedSteps,
+    packColumnCount
+  );
+  const nodes: TraceFlowNode[] = [];
+
+  function appendGroup(block: TraceFlowGroupBlock) {
+    const position = blockPositions.get(block.groupId) ?? { x: 24, y: 24 };
+    nodes.push({
+      id: block.groupId,
+      type: "traceGroup",
+      position,
+      data: block.data,
+      selectable: false,
+      style: { height: block.height, width: block.width },
+      zIndex: 0
+    });
+    if (block.collapsed) {
+      return;
+    }
+    block.steps.forEach((step) => {
+      const stepPosition = block.layout.positions.get(step.id) ?? { x: 0, y: 0 };
+      nodes.push({
+        id: step.id,
+        type: "traceStep",
+        data: {
+          artifactCount: artifactsByStepId[step.id]?.length ?? 0,
+          onSelectStep,
+          step
+        },
+        extent: "parent",
+        parentId: block.groupId,
+        position: {
+          x: stepPosition.x + (block.width - block.layout.width) / 2,
+          y: stepPosition.y + TRACE_GROUP_HEADER_HEIGHT
+        },
+        selected: selectedStepId === step.id,
+        style: { height: TRACE_STEP_HEIGHT, width: TRACE_STEP_WIDTH },
+        zIndex: 1
+      });
+    });
+  }
+
+  if (orchestrationBlock) {
+    appendGroup(orchestrationBlock);
+  }
+  contextBlocks.forEach(appendGroup);
+
+  const stepById = new Map(sortedSteps.map((step) => [step.id, step]));
+  const visibleNodeId = (step: AgentStep) =>
+    step.context_pack_id && collapsedContextIds.has(step.context_pack_id)
+      ? contextFlowGroupId(step.context_pack_id)
+      : step.id;
+  const edgeIds = new Set<string>();
+  const edges = sortedSteps.flatMap<Edge>((step) => {
+    if (!step.parent_step_id) {
+      return [];
+    }
+    const parent = stepById.get(step.parent_step_id);
+    if (!parent) {
+      return [];
+    }
+    const source = visibleNodeId(parent);
+    const target = visibleNodeId(step);
+    const edgeId = `trace-edge-${source}-${target}`;
+    if (source === target || edgeIds.has(edgeId)) {
+      return [];
+    }
+    edgeIds.add(edgeId);
+    const failed = parent.status === "failed" || step.status === "failed";
+    const running = parent.status === "running" || step.status === "running";
+    const color = failed ? "#b42318" : running ? "#0f766e" : "#91a39c";
+    return [
+      {
+        id: edgeId,
+        animated: running,
+        markerEnd: { color, type: MarkerType.ArrowClosed },
+        source,
+        target,
+        type: "smoothstep",
+        style: { stroke: color, strokeWidth: running ? 2.2 : 1.6 },
+        zIndex: 2
+      }
+    ];
+  });
+
+  return { edges, nodes };
+}
+
+function layoutTraceGroupBlocks(
+  orchestrationBlock: TraceFlowGroupBlock | null,
+  contextBlocks: TraceFlowGroupBlock[],
+  steps: AgentStep[],
+  requestedColumnCount: number
+) {
+  const positions = new Map<string, { x: number; y: number }>();
+  if (!contextBlocks.length) {
+    if (orchestrationBlock) {
+      positions.set(orchestrationBlock.groupId, { x: 24, y: 24 });
+    }
+    return positions;
+  }
+
+  const stepById = new Map(steps.map((step) => [step.id, step]));
+  const blockByContextId = new Map(
+    contextBlocks.flatMap((block) =>
+      block.data.contextPackId ? [[block.data.contextPackId, block] as const] : []
+    )
+  );
+  const predecessors = new Map<string, Set<string>>();
+  steps.forEach((step) => {
+    if (!step.context_pack_id || !step.parent_step_id) {
+      return;
+    }
+    const parentContextId = stepById.get(step.parent_step_id)?.context_pack_id;
+    if (
+      parentContextId &&
+      parentContextId !== step.context_pack_id &&
+      blockByContextId.has(parentContextId)
+    ) {
+      const current = predecessors.get(step.context_pack_id) ?? new Set<string>();
+      current.add(parentContextId);
+      predecessors.set(step.context_pack_id, current);
+    }
+  });
+
+  const depthCache = new Map<string, number>();
+  function contextDepth(contextPackId: string, visiting = new Set<string>()): number {
+    const cached = depthCache.get(contextPackId);
+    if (cached !== undefined) {
+      return cached;
+    }
+    if (visiting.has(contextPackId)) {
+      return 0;
+    }
+    const nextVisiting = new Set(visiting).add(contextPackId);
+    const depth = Math.max(
+      0,
+      ...[...(predecessors.get(contextPackId) ?? [])].map(
+        (predecessorId) => contextDepth(predecessorId, nextVisiting) + 1
+      )
+    );
+    depthCache.set(contextPackId, depth);
+    return depth;
+  }
+
+  const blocksByDepth = new Map<number, TraceFlowGroupBlock[]>();
+  contextBlocks.forEach((block) => {
+    const contextPackId = block.data.contextPackId;
+    const depth = contextPackId ? contextDepth(contextPackId) : 0;
+    blocksByDepth.set(depth, [...(blocksByDepth.get(depth) ?? []), block]);
+  });
+  const depthBands = [...blocksByDepth.entries()].sort(([left], [right]) => left - right);
+  const widestBand = Math.max(...depthBands.map(([, blocks]) => blocks.length));
+  const columnCount = Math.max(1, Math.min(requestedColumnCount, widestBand));
+  const columnWidth = Math.max(...contextBlocks.map((block) => block.width));
+  const columnGap = 86;
+  const packAreaWidth = columnCount * columnWidth + (columnCount - 1) * columnGap;
+  const canvasWidth = Math.max(packAreaWidth, orchestrationBlock?.width ?? 0);
+  let bandY = 24;
+
+  if (orchestrationBlock) {
+    positions.set(orchestrationBlock.groupId, {
+      x: (canvasWidth - orchestrationBlock.width) / 2,
+      y: bandY
+    });
+    bandY += orchestrationBlock.height + 144;
+  }
+
+  depthBands.forEach(([, unsortedBlocks]) => {
+    const blocks = [...unsortedBlocks].sort(
+      (left, right) =>
+        Math.min(...left.steps.map((step) => step.sequence)) -
+        Math.min(...right.steps.map((step) => step.sequence))
+    );
+    const activeColumnCount = Math.min(columnCount, blocks.length);
+    const bandWidth = activeColumnCount * columnWidth + (activeColumnCount - 1) * columnGap;
+    const bandX = (canvasWidth - bandWidth) / 2;
+    const columnHeights = Array.from({ length: activeColumnCount }, () => 0);
+
+    blocks.forEach((block, index) => {
+      const column =
+        index < activeColumnCount
+          ? index
+          : columnHeights.reduce(
+              (shortest, height, candidate) =>
+                height < columnHeights[shortest] ? candidate : shortest,
+              0
+            );
+      positions.set(block.groupId, {
+        x: bandX + column * (columnWidth + columnGap) + (columnWidth - block.width) / 2,
+        y: bandY + columnHeights[column]
+      });
+      columnHeights[column] += block.height + TRACE_GROUP_GAP;
+    });
+    bandY += Math.max(...columnHeights) + 52;
+  });
+
+  return positions;
+}
+
+async function layoutTraceSteps(steps: AgentStep[]): Promise<TraceStepLayout> {
+  if (!steps.length) {
+    return emptyStepLayout();
+  }
+  const shouldWrap = steps.length > 8;
+  const stepIds = new Set(steps.map((step) => step.id));
+  const graph = await traceElk.layout({
+    id: "trace-layout",
+    layoutOptions: {
+      "elk.algorithm": "layered",
+      "elk.aspectRatio": shouldWrap ? "0.6" : "0.75",
+      "elk.direction": "DOWN",
+      "elk.edgeRouting": "ORTHOGONAL",
+      "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "64",
+      "elk.layered.wrapping.correctionFactor": "1",
+      "elk.layered.wrapping.multiEdge.improveCuts": "true",
+      "elk.layered.wrapping.multiEdge.improveWrappedEdges": "true",
+      "elk.layered.wrapping.strategy": shouldWrap ? "MULTI_EDGE" : "OFF",
+      "elk.padding": "[top=12,left=12,bottom=12,right=12]",
+      "elk.spacing.nodeNode": "32"
+    },
+    children: steps.map((step) => ({
+      id: step.id,
+      height: TRACE_STEP_HEIGHT,
+      width: TRACE_STEP_WIDTH
+    })),
+    edges: steps.flatMap((step) =>
+      step.parent_step_id && stepIds.has(step.parent_step_id)
+        ? [
+            {
+              id: `layout-${step.parent_step_id}-${step.id}`,
+              sources: [step.parent_step_id],
+              targets: [step.id]
+            }
+          ]
+        : []
+    )
+  } as ElkNode);
+  return {
+    height: graph.height ?? TRACE_STEP_HEIGHT,
+    positions: new Map(
+      (graph.children ?? []).map((child) => [child.id, { x: child.x ?? 0, y: child.y ?? 0 }])
+    ),
+    width: graph.width ?? TRACE_STEP_WIDTH
+  };
+}
+
+function emptyStepLayout(): TraceStepLayout {
+  return { height: TRACE_STEP_HEIGHT, positions: new Map(), width: TRACE_STEP_WIDTH };
+}
+
+function contextFlowGroupId(contextPackId: string) {
+  return `trace-group-context-${contextPackId}`;
+}
+
+function statusColor(status: string) {
+  const tone = statusTone(status);
+  if (tone === "ok") {
+    return "#167044";
+  }
+  if (tone === "warn") {
+    return "#a16207";
+  }
+  if (tone === "bad") {
+    return "#b42318";
+  }
+  return "#6254a4";
 }
 
 function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
@@ -920,129 +1587,177 @@ function GeneratedTestPage({
 }
 
 function AgentRunPage({ agentRunId }: { agentRunId: string }) {
-  const run = useAsyncData(() => api.getAgentRun(agentRunId), [agentRunId]);
   const traceData = useTraceData(agentRunId);
-  const steps = traceData.steps;
   const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
-  const selectedStep = steps.data?.find((step) => step.id === selectedStepId) ?? steps.data?.[0] ?? null;
-  const artifacts = useAsyncData(
-    () => (selectedStep ? api.listAgentArtifacts(selectedStep.id) : Promise.resolve([])),
-    [selectedStep?.id]
-  );
+  const selectedStep = traceData.steps.find((step) => step.id === selectedStepId) ?? null;
+  const artifacts = selectedStep ? traceData.artifactsByStepId[selectedStep.id] ?? [] : [];
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
   const selectedArtifact =
-    artifacts.data?.find((artifact) => artifact.id === selectedArtifactId) ?? artifacts.data?.[0] ?? null;
+    artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? artifacts[0] ?? null;
   const provenance = useAsyncData(
     () => (selectedArtifact ? api.listArtifactProvenance(selectedArtifact.id) : Promise.resolve([])),
     [selectedArtifact?.id]
   );
 
   useEffect(() => {
-    if (!selectedStepId && steps.data?.[0]) {
-      setSelectedStepId(steps.data[0].id);
+    setSelectedArtifactId(null);
+  }, [selectedStepId]);
+
+  useEffect(() => {
+    if (!selectedStepId) {
+      return;
     }
-  }, [selectedStepId, steps.data]);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSelectedStepId(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedStepId]);
 
   useEffect(() => {
     if (
       selectedArtifactId &&
-      artifacts.data &&
-      !artifacts.data.some((artifact) => artifact.id === selectedArtifactId)
+      !artifacts.some((artifact) => artifact.id === selectedArtifactId)
     ) {
       setSelectedArtifactId(null);
     }
-  }, [artifacts.data, selectedArtifactId]);
+  }, [artifacts, selectedArtifactId]);
 
-  const allTraceArtifacts = traceData.artifactsByStepId.data ?? {};
-  const modelCallCount = Object.values(allTraceArtifacts)
-    .flat()
-    .filter((artifact) => isModelResponseArtifact(artifact)).length;
+  const modelCallCount = traceData.steps.filter((step) => step.step_type === "model_call").length;
 
   return (
     <div className="page stack">
       <PageTitle
         icon={<Network size={22} />}
-        title={run.data ? labelize(run.data.run_type) : "Agent run"}
+        title={traceData.run ? labelize(traceData.run.run_type) : "Agent run"}
         eyebrow={shortId(agentRunId)}
       />
-      <AsyncBoundary state={run}>
-        {run.data ? (
-          <div className="metric-grid">
-            <Metric label="Status" value={run.data.status} tone={statusTone(run.data.status)} />
-            <Metric label="Model" value={run.data.model_profile ?? "-"} />
-            <Metric label="Duration" value={formatDuration(run.data.started_at, run.data.finished_at)} />
-            <Metric label="LLM calls" value={modelCallCount} tone="neutral" />
-          </div>
-        ) : null}
-      </AsyncBoundary>
+      {traceData.error && !traceData.run ? <InlineError message={traceData.error} /> : null}
+      {traceData.run ? (
+        <div className="metric-grid">
+          <Metric
+            label="Status"
+            value={labelize(traceData.run.status)}
+            tone={statusTone(traceData.run.status)}
+          />
+          <Metric label="Model" value={traceData.run.model_profile ?? "-"} />
+          <Metric
+            label="Duration"
+            value={formatLiveDuration(traceData.run.started_at, traceData.run.finished_at)}
+          />
+          <Metric label="LLM calls" value={modelCallCount} tone="neutral" />
+        </div>
+      ) : null}
 
       <section className="panel">
-        <PanelHeader title="Trace graph" icon={<Network size={17} />} />
+        <PanelHeader title="Live execution graph" icon={<Network size={17} />} />
         <TracePreview
           artifactsByStepId={traceData.artifactsByStepId}
-          loading={traceData.steps.loading || traceData.artifactsByStepId.loading}
-          onSelectArtifact={(stepId, artifactId) => {
-            setSelectedStepId(stepId);
-            setSelectedArtifactId(artifactId);
-          }}
+          connection={traceData.connection}
+          error={traceData.error}
+          loading={traceData.loading}
           onSelectStep={(stepId) => setSelectedStepId(stepId)}
-          selectedArtifactId={selectedArtifact?.id ?? selectedArtifactId}
-          selectedStepId={selectedStep?.id ?? selectedStepId}
-          steps={traceData.steps.data ?? []}
+          selectedStepId={selectedStepId}
+          steps={traceData.steps}
         />
       </section>
 
-      <div className="two-column wide-right">
-        <section className="panel">
-          <PanelHeader title="Step detail" icon={<Eye size={17} />} />
-          {selectedStep ? (
-            <div className="stack">
-              <div className="row wrap">
-                <StatusPill status={selectedStep.status} />
-                <span className="muted">Sequence {selectedStep.sequence}</span>
-                <span className="muted">{formatDuration(selectedStep.started_at, selectedStep.finished_at)}</span>
-              </div>
-              <PanelSubhead title="Input" />
-              <JsonBlock payload={selectedStep.input_summary} />
-              <PanelSubhead title="Output" />
-              <JsonBlock payload={selectedStep.output_summary} />
-              {selectedStep.warning_summary.length ? (
-                <>
-                  <PanelSubhead title="Warnings" />
-                  <JsonBlock payload={selectedStep.warning_summary} />
-                </>
-              ) : null}
-            </div>
-          ) : (
-            <div className="empty-state">No selected step</div>
-          )}
-        </section>
+      {selectedStep ? (
+        <TraceDetailDrawer
+          artifacts={artifacts}
+          onClose={() => setSelectedStepId(null)}
+          onSelectArtifact={setSelectedArtifactId}
+          provenance={provenance}
+          selectedArtifact={selectedArtifact}
+          step={selectedStep}
+        />
+      ) : null}
+    </div>
+  );
+}
 
-        <section className="panel">
-          <PanelHeader title="Artifacts and provenance" icon={<Package size={17} />} />
-          <AsyncBoundary state={artifacts}>
-            <div className="artifact-list">
-              {(artifacts.data ?? []).map((artifact: AgentArtifact) => (
-                <button
-                  className={`artifact-item ${selectedArtifact?.id === artifact.id ? "active" : ""}`}
-                  key={artifact.id}
-                  onClick={() => setSelectedArtifactId(artifact.id)}
-                >
-                  <Package size={15} />
-                  <span>{artifactLabel(artifact)}</span>
-                  <code>{shortSha(artifact.content_hash)}</code>
-                </button>
-              ))}
-              {artifacts.data?.length === 0 ? <div className="empty-state">No artifacts</div> : null}
-            </div>
-          </AsyncBoundary>
+function TraceDetailDrawer({
+  step,
+  artifacts,
+  selectedArtifact,
+  provenance,
+  onSelectArtifact,
+  onClose
+}: {
+  step: AgentStep;
+  artifacts: AgentArtifact[];
+  selectedArtifact: AgentArtifact | null;
+  provenance: AsyncState<ProvenanceRef[]> & { reload: () => Promise<void> };
+  onSelectArtifact: (artifactId: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="trace-drawer-layer">
+      <button aria-label="Close trace details" className="trace-drawer-backdrop" onClick={onClose} />
+      <aside aria-label={`${stepNodeTitle(step)} details`} className="trace-detail-drawer" role="dialog">
+        <div className="trace-drawer-header">
+          <div>
+            <span className="eyebrow">{stepNodeKind(step)} · sequence {step.sequence}</span>
+            <h2>{stepNodeTitle(step)}</h2>
+          </div>
+          <IconButton label="Close trace details" onClick={onClose}>
+            <X size={17} />
+          </IconButton>
+        </div>
+        <div className="trace-drawer-scroll stack">
+          <div className="row wrap">
+            <StatusPill status={step.status} />
+            {step.activity ? <span className="activity-label">{labelize(step.activity)}</span> : null}
+            <span className="muted">{formatStepDuration(step)}</span>
+          </div>
+          <dl className="compact-definitions">
+            <dt>Context pack</dt>
+            <dd>{shortId(step.context_pack_id)}</dd>
+            <dt>Iteration</dt>
+            <dd>{step.iteration ?? "-"}</dd>
+            <dt>Parent</dt>
+            <dd>{shortId(step.parent_step_id)}</dd>
+          </dl>
+
+          <PanelSubhead title="Input summary" />
+          <JsonBlock payload={step.input_summary} />
+          <PanelSubhead title="Output summary" />
+          <JsonBlock payload={step.output_summary} />
+          {step.warning_summary.length ? (
+            <>
+              <PanelSubhead title="Warnings" />
+              <JsonBlock payload={step.warning_summary} />
+            </>
+          ) : null}
+
+          <PanelSubhead title={`Artifacts (${artifacts.length})`} />
+          <div className="artifact-list drawer-artifact-list">
+            {artifacts.map((artifact) => (
+              <button
+                className={`artifact-item ${selectedArtifact?.id === artifact.id ? "active" : ""}`}
+                key={artifact.id}
+                onClick={() => onSelectArtifact(artifact.id)}
+                type="button"
+              >
+                {artifactIcon(artifact)}
+                <span>{artifactLabel(artifact)}</span>
+                <code>{shortSha(artifact.content_hash)}</code>
+              </button>
+            ))}
+            {artifacts.length === 0 ? <div className="empty-state">No artifacts for this step</div> : null}
+          </div>
+
           {selectedArtifact ? (
-            <div className="stack">
+            <div className="artifact-detail stack">
               <dl className="compact-definitions">
+                <dt>Artifact</dt>
+                <dd>{artifactNodeTitle(selectedArtifact)}</dd>
                 <dt>URI</dt>
                 <dd className="break-anywhere">{selectedArtifact.artifact_uri}</dd>
                 <dt>Hash</dt>
-                <dd>{selectedArtifact.content_hash ?? "-"}</dd>
+                <dd className="break-anywhere">{selectedArtifact.content_hash ?? "-"}</dd>
               </dl>
               <PanelSubhead title="Provenance" />
               <AsyncBoundary state={provenance}>
@@ -1056,34 +1771,143 @@ function AgentRunPage({ agentRunId }: { agentRunId: string }) {
                       </div>
                     </div>
                   ))}
-                  {provenance.data?.length === 0 ? <div className="empty-state">No provenance refs</div> : null}
+                  {provenance.data?.length === 0 ? (
+                    <div className="empty-state">No provenance refs</div>
+                  ) : null}
                 </div>
               </AsyncBoundary>
             </div>
           ) : null}
-        </section>
-      </div>
+        </div>
+      </aside>
     </div>
   );
 }
 
 function useTraceData(agentRunId: string | null) {
-  const steps = useAsyncData(
-    () => (agentRunId ? api.listAgentSteps(agentRunId) : Promise.resolve([])),
-    [agentRunId]
-  );
-  const stepIds = useMemo(() => (steps.data ?? []).map((step) => step.id).join("|"), [steps.data]);
-  const artifactsByStepId = useAsyncData(async () => {
-    if (!steps.data?.length) {
-      return {};
-    }
-    const entries = await Promise.all(
-      steps.data.map(async (step) => [step.id, await api.listAgentArtifacts(step.id)] as const)
-    );
-    return Object.fromEntries(entries);
-  }, [stepIds]);
+  const [state, setState] = useState<LiveTraceState>(() => emptyLiveTraceState());
+  const lastEventIdRef = useRef(0);
 
-  return { steps, artifactsByStepId };
+  useEffect(() => {
+    let cancelled = false;
+    let eventSource: EventSource | null = null;
+    let replaying = false;
+    lastEventIdRef.current = 0;
+    setState(emptyLiveTraceState(agentRunId ? "connecting" : "idle"));
+
+    function applyExecutionEvent(event: ExecutionEvent) {
+      if (cancelled || event.id <= lastEventIdRef.current) {
+        return;
+      }
+      lastEventIdRef.current = event.id;
+      const runUpdate = eventPayloadRecord<AgentRun>(event, "run");
+      const stepUpdate = eventPayloadRecord<AgentStep>(event, "step");
+      const artifactUpdate = eventPayloadRecord<AgentArtifact>(event, "artifact");
+
+      setState((current) => {
+        const run = runUpdate ?? current.run;
+        const steps = stepUpdate ? upsertById(current.steps, stepUpdate) : current.steps;
+        const artifactsByStepId = artifactUpdate
+          ? upsertArtifact(current.artifactsByStepId, artifactUpdate)
+          : current.artifactsByStepId;
+        return {
+          ...current,
+          run,
+          steps: [...steps].sort((left, right) => left.sequence - right.sequence),
+          artifactsByStepId,
+          lastEventId: event.id,
+          connection: run && isTerminalAgentRun(run.status) ? "complete" : current.connection
+        };
+      });
+
+      if (runUpdate && isTerminalAgentRun(runUpdate.status)) {
+        eventSource?.close();
+      }
+    }
+
+    async function replayDurableEvents() {
+      if (!agentRunId || replaying || cancelled) {
+        return;
+      }
+      replaying = true;
+      try {
+        const events = await api.listAgentRunEvents(agentRunId, lastEventIdRef.current);
+        events.forEach(applyExecutionEvent);
+      } catch {
+        // EventSource continues its own retry cycle; a later replay will retry the durable gap.
+      } finally {
+        replaying = false;
+      }
+    }
+
+    function connect(afterEventId: number) {
+      if (!agentRunId || cancelled) {
+        return;
+      }
+      eventSource = new EventSource(api.agentRunEventStreamUrl(agentRunId, afterEventId));
+      const onEvent = (message: Event) => {
+        try {
+          applyExecutionEvent(JSON.parse((message as MessageEvent<string>).data) as ExecutionEvent);
+        } catch {
+          setState((current) => ({ ...current, error: "A live trace event could not be read." }));
+        }
+      };
+      TRACE_EVENT_TYPES.forEach((eventType) => eventSource?.addEventListener(eventType, onEvent));
+      eventSource.onopen = () => {
+        if (!cancelled) {
+          setState((current) => ({ ...current, connection: "live", error: null }));
+        }
+      };
+      eventSource.onerror = () => {
+        if (!cancelled) {
+          setState((current) => ({ ...current, connection: "reconnecting" }));
+          void replayDurableEvents();
+        }
+      };
+    }
+
+    async function initialize() {
+      if (!agentRunId) {
+        return;
+      }
+      try {
+        const snapshot = await api.getAgentRunSnapshot(agentRunId);
+        if (cancelled) {
+          return;
+        }
+        lastEventIdRef.current = snapshot.last_event_id;
+        const terminal = isTerminalAgentRun(snapshot.run.status);
+        setState({
+          run: snapshot.run,
+          steps: [...snapshot.steps].sort((left, right) => left.sequence - right.sequence),
+          artifactsByStepId: groupArtifactsByStep(snapshot.artifacts),
+          lastEventId: snapshot.last_event_id,
+          loading: false,
+          error: null,
+          connection: terminal ? "complete" : "connecting"
+        });
+        if (!terminal) {
+          connect(snapshot.last_event_id);
+        }
+      } catch (exc) {
+        if (!cancelled) {
+          setState({
+            ...emptyLiveTraceState("idle"),
+            loading: false,
+            error: errorMessage(exc)
+          });
+        }
+      }
+    }
+
+    void initialize();
+    return () => {
+      cancelled = true;
+      eventSource?.close();
+    };
+  }, [agentRunId]);
+
+  return state;
 }
 
 function useHashRoute(): Route {
@@ -1318,6 +2142,23 @@ function formatDuration(start: string | null | undefined, end: string | null | u
   return `${(durationMs / 1000).toFixed(1)} s`;
 }
 
+function formatLiveDuration(start: string | null | undefined, end: string | null | undefined) {
+  if (start && !end) {
+    return "In progress";
+  }
+  return formatDuration(start, end);
+}
+
+function formatStepDuration(step: AgentStep) {
+  const recordedDuration = step.output_summary.duration_ms;
+  if (typeof recordedDuration === "number") {
+    return recordedDuration < 1000
+      ? `${recordedDuration} ms`
+      : `${(recordedDuration / 1000).toFixed(1)} s`;
+  }
+  return formatLiveDuration(step.started_at, step.finished_at);
+}
+
 function statusTone(status: string | null | undefined): "ok" | "warn" | "bad" | "neutral" {
   if (!status) {
     return "neutral";
@@ -1358,22 +2199,6 @@ function artifactNodeTitle(artifact: AgentArtifact) {
   return fileName ?? shortId(artifact.id);
 }
 
-function artifactClass(artifact: AgentArtifact) {
-  if (artifact.artifact_type === "prompt") {
-    return "prompt-artifact";
-  }
-  if (artifact.artifact_type === "raw_model_response") {
-    return "model-artifact";
-  }
-  if (artifact.artifact_type === "validated_output") {
-    return "validated-artifact";
-  }
-  if (artifact.artifact_type === "trace") {
-    return "trace-artifact";
-  }
-  return "support-artifact";
-}
-
 function artifactIcon(artifact: AgentArtifact) {
   if (artifact.artifact_type === "prompt") {
     return <FileText size={16} />;
@@ -1393,19 +2218,27 @@ function artifactIcon(artifact: AgentArtifact) {
   return <Package size={16} />;
 }
 
-function isModelResponseArtifact(artifact: AgentArtifact) {
-  return artifact.artifact_type === "raw_model_response";
-}
-
 function stepNodeKind(step: AgentStep) {
   if (step.step_type === "build_test_plan") {
     return "Agent planner";
+  }
+  if (step.step_type === "model_call") {
+    return "Model call";
   }
   if (step.step_type === "tool_call") {
     return "Repository tool";
   }
   if (step.step_type === "generate_questions") {
-    return "Structured generation";
+    return "Generation run";
+  }
+  if (step.step_type === "validate_output") {
+    return "Contract check";
+  }
+  if (step.step_type === "verify_evidence") {
+    return "Evidence check";
+  }
+  if (step.step_type === "persist_result") {
+    return "Persistence";
   }
   return "Step";
 }
@@ -1417,8 +2250,24 @@ function stepNodeTitle(step: AgentStep) {
   if (step.step_type === "tool_call" && typeof step.input_summary.tool_name === "string") {
     return step.input_summary.tool_name;
   }
+  if (step.step_type === "model_call" && typeof step.input_summary.action === "string") {
+    const action = step.input_summary.action;
+    if (action === "inspect_repository") {
+      return "Inspect repository";
+    }
+    if (action === "regenerate_evidence") {
+      return "Regenerate evidence";
+    }
+    return labelize(action);
+  }
   if (step.step_type === "generate_questions") {
     return "Generate test";
+  }
+  if (step.step_type === "validate_output") {
+    return "Validate generated test";
+  }
+  if (step.step_type === "verify_evidence") {
+    return "Verify evidence references";
   }
   if (step.step_type === "persist_result") {
     return "Persist result";
@@ -1427,6 +2276,10 @@ function stepNodeTitle(step: AgentStep) {
 }
 
 function stepNodeDetail(step: AgentStep) {
+  const error = step.output_summary.error;
+  if (typeof error === "string" && error) {
+    return error;
+  }
   if (step.step_type === "build_test_plan") {
     const turns = step.output_summary.model_turn_count;
     const toolCalls = step.output_summary.completed_tool_call_count;
@@ -1440,8 +2293,175 @@ function stepNodeDetail(step: AgentStep) {
     if (typeof duration === "number" && typeof evidence === "number") {
       return `${duration} ms · ${evidence} evidence ${evidence === 1 ? "ref" : "refs"}`;
     }
+    const argumentsValue = step.input_summary.arguments;
+    if (argumentsValue && typeof argumentsValue === "object") {
+      const argumentSummary = Object.entries(argumentsValue)
+        .filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+        .slice(0, 2)
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(" · ");
+      if (argumentSummary) {
+        return argumentSummary;
+      }
+    }
+  }
+  if (step.step_type === "model_call") {
+    const finishReason = step.output_summary.finish_reason;
+    const toolCalls = step.output_summary.tool_call_count;
+    if (typeof finishReason === "string" && typeof toolCalls === "number") {
+      return `${labelize(finishReason)} · ${toolCalls} requested tool ${toolCalls === 1 ? "call" : "calls"}`;
+    }
+  }
+  if (step.step_type === "validate_output" && step.output_summary.schema_valid === true) {
+    return `Valid ${String(step.output_summary.payload_type ?? "structured")} payload`;
+  }
+  if (step.step_type === "verify_evidence") {
+    const acceptedRefs = step.output_summary.accepted_refs;
+    if (Array.isArray(acceptedRefs)) {
+      const validCount = acceptedRefs.length;
+      return `${validCount} verified evidence ${validCount === 1 ? "reference" : "references"}`;
+    }
   }
   return null;
+}
+
+function stepStateSummary(step: AgentStep) {
+  if (step.activity) {
+    return labelize(step.activity);
+  }
+  if (step.warning_summary.length) {
+    return `${step.warning_summary.length} ${step.warning_summary.length === 1 ? "warning" : "warnings"}`;
+  }
+  return labelize(step.status);
+}
+
+function stepNodeIcon(step: AgentStep) {
+  if (step.step_type === "model_call") {
+    return <Activity size={17} />;
+  }
+  if (step.step_type === "tool_call") {
+    return <Database size={17} />;
+  }
+  if (step.step_type === "validate_output") {
+    return <CheckCircle2 size={17} />;
+  }
+  if (step.step_type === "verify_evidence") {
+    return <Eye size={17} />;
+  }
+  if (step.step_type === "persist_result") {
+    return <Package size={17} />;
+  }
+  if (step.step_type === "build_test_plan") {
+    return <GitBranch size={17} />;
+  }
+  return <CircleDashed size={17} />;
+}
+
+function TraceConnectionIndicator({ connection }: { connection: TraceConnection }) {
+  const label =
+    connection === "live"
+      ? "Live"
+      : connection === "reconnecting"
+        ? "Reconnecting"
+        : connection === "complete"
+          ? "Recorded"
+          : connection === "connecting"
+            ? "Connecting"
+            : "Offline";
+  return (
+    <span className={`trace-connection ${connection}`}>
+      <span className="node-dot" />
+      {label}
+    </span>
+  );
+}
+
+function groupStepsByContextPack(steps: AgentStep[]) {
+  const groups = new Map<string, AgentStep[]>();
+  steps.forEach((step) => {
+    if (!step.context_pack_id) {
+      return;
+    }
+    groups.set(step.context_pack_id, [...(groups.get(step.context_pack_id) ?? []), step]);
+  });
+  return [...groups.entries()].map(([contextPackId, contextSteps]) => ({
+    contextPackId,
+    steps: contextSteps
+  }));
+}
+
+function contextGroupTitle(steps: AgentStep[]) {
+  const packType = steps
+    .map((step) => step.input_summary.pack_type)
+    .find((value): value is string => typeof value === "string");
+  return packType ? labelize(packType) : "Generated test branch";
+}
+
+function groupStatus(steps: AgentStep[]) {
+  if (steps.some((step) => step.status === "failed")) {
+    return "failed";
+  }
+  if (steps.some((step) => step.status === "running")) {
+    return "running";
+  }
+  if (steps.some((step) => step.status === "cancelled" || step.status === "interrupted")) {
+    return "interrupted";
+  }
+  if (steps.length && steps.every((step) => step.status === "succeeded")) {
+    return "succeeded";
+  }
+  return "queued";
+}
+
+function findExternalParent(groupSteps: AgentStep[], allSteps: AgentStep[]) {
+  const groupStepIds = new Set(groupSteps.map((step) => step.id));
+  const parentId = groupSteps
+    .map((step) => step.parent_step_id)
+    .find((value): value is string => Boolean(value && !groupStepIds.has(value)));
+  return parentId ? allSteps.find((step) => step.id === parentId) ?? null : null;
+}
+
+function emptyLiveTraceState(connection: TraceConnection = "idle"): LiveTraceState {
+  return {
+    run: null,
+    steps: [],
+    artifactsByStepId: {},
+    lastEventId: 0,
+    loading: connection !== "idle",
+    error: null,
+    connection
+  };
+}
+
+function isTerminalAgentRun(status: string) {
+  return TERMINAL_AGENT_STATUSES.has(status);
+}
+
+function groupArtifactsByStep(artifacts: AgentArtifact[]) {
+  return artifacts.reduce<ArtifactsByStepId>((groups, artifact) => {
+    groups[artifact.agent_step_id] = [...(groups[artifact.agent_step_id] ?? []), artifact];
+    return groups;
+  }, {});
+}
+
+function upsertArtifact(groups: ArtifactsByStepId, artifact: AgentArtifact) {
+  return {
+    ...groups,
+    [artifact.agent_step_id]: upsertById(groups[artifact.agent_step_id] ?? [], artifact)
+  };
+}
+
+function upsertById<T extends { id: string }>(values: T[], nextValue: T) {
+  const existingIndex = values.findIndex((value) => value.id === nextValue.id);
+  if (existingIndex === -1) {
+    return [...values, nextValue];
+  }
+  return values.map((value, index) => (index === existingIndex ? nextValue : value));
+}
+
+function eventPayloadRecord<T>(event: ExecutionEvent, key: string): T | null {
+  const value = event.payload[key];
+  return value && typeof value === "object" ? (value as T) : null;
 }
 
 function testTitle(test: GeneratedTest) {

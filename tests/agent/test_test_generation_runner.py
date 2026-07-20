@@ -9,6 +9,7 @@ import pytest
 from ooh.agent import AgentArtifactStore, GeneratedTestRunService
 from ooh.agent.providers import ModelRequest, ModelResponse, ModelToolCall
 from ooh.db.models import (
+    AgentActivity,
     AgentArtifactRead,
     AgentArtifactType,
     AgentRunRead,
@@ -55,6 +56,31 @@ class FakeProvider:
             raw_response={"message": {"content": response}},
             finish_reason="stop",
         )
+
+
+class ObservingProvider(FakeProvider):
+    def __init__(
+        self,
+        response: str | ModelResponse | list[str | ModelResponse],
+        *,
+        before_generate: Any,
+    ) -> None:
+        super().__init__(response)
+        self.before_generate = before_generate
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.before_generate(request)
+        return super().generate(request)
+
+
+class FailingProvider:
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.requests: list[ModelRequest] = []
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.requests.append(request)
+        raise self.error
 
 
 class FakeGeneratedTestRepo:
@@ -122,9 +148,13 @@ class FakeAgentTraceRepo:
         step = AgentStepRead(
             id=uuid4(),
             agent_run_id=input.agent_run_id,
+            parent_step_id=input.parent_step_id,
+            context_pack_id=input.context_pack_id,
             step_type=input.step_type,
             status=input.status,
+            activity=input.activity,
             sequence=input.sequence,
+            iteration=input.iteration,
             input_summary=input.input_summary,
             output_summary=input.output_summary,
             warning_summary=input.warning_summary,
@@ -135,9 +165,20 @@ class FakeAgentTraceRepo:
         self.steps[step.id] = step
         return step
 
-    def mark_step_running(self, step_id: UUID) -> AgentStepRead:
+    def mark_step_running(
+        self,
+        step_id: UUID,
+        *,
+        activity: AgentActivity | None = None,
+    ) -> AgentStepRead:
         step = self.steps[step_id]
-        updated = step.model_copy(update={"status": AgentStatus.RUNNING, "started_at": now()})
+        updated = step.model_copy(
+            update={
+                "status": AgentStatus.RUNNING,
+                "activity": activity,
+                "started_at": now(),
+            }
+        )
         self.steps[step_id] = updated
         return updated
 
@@ -153,8 +194,13 @@ class FakeAgentTraceRepo:
         updated = step.model_copy(
             update={
                 "status": status,
-                "output_summary": output_summary if output_summary is not None else step.output_summary,
-                "warning_summary": warning_summary if warning_summary is not None else step.warning_summary,
+                "activity": None,
+                "output_summary": output_summary
+                if output_summary is not None
+                else step.output_summary,
+                "warning_summary": warning_summary
+                if warning_summary is not None
+                else step.warning_summary,
                 "finished_at": now(),
             }
         )
@@ -225,11 +271,25 @@ def test_generated_test_run_service_persists_tests_and_trace_artifacts(tmp_path)
     assert generated_test_repo.inputs[0].test_payload["type"] == "short_answer"
     assert generated_test_repo.inputs[0].drift_event_id == context_pack_drift_id()
 
-    assert [step.step_type for step in trace_repo.steps.values()] == [
+    steps = list(trace_repo.steps.values())
+    assert [step.step_type for step in steps] == [
         AgentStepType.GENERATE_QUESTIONS,
+        AgentStepType.MODEL_CALL,
+        AgentStepType.VALIDATE_OUTPUT,
+        AgentStepType.VERIFY_EVIDENCE,
         AgentStepType.PERSIST_RESULT,
     ]
-    assert all(step.status == AgentStatus.SUCCEEDED for step in trace_repo.steps.values())
+    assert all(step.status == AgentStatus.SUCCEEDED for step in steps)
+    assert all(step.activity is None for step in steps)
+    generation_step, model_step, validation_step, evidence_step, persist_step = steps
+    assert model_step.parent_step_id == generation_step.id
+    assert validation_step.parent_step_id == model_step.id
+    assert evidence_step.parent_step_id == validation_step.id
+    assert persist_step.parent_step_id == generation_step.id
+    assert model_step.context_pack_id == context_pack.context_pack.id
+    assert validation_step.context_pack_id == context_pack.context_pack.id
+    assert evidence_step.context_pack_id == context_pack.context_pack.id
+    assert [model_step.iteration, validation_step.iteration, evidence_step.iteration] == [1, 1, 1]
     assert [artifact.artifact_type for artifact in trace_repo.artifacts] == [
         AgentArtifactType.PROMPT,
         AgentArtifactType.RAW_MODEL_RESPONSE,
@@ -289,9 +349,7 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
                         {"id": "B", "text": "Service.__init__"},
                     ],
                     "correct_option_ids": ["A"],
-                    "evidence_refs": [
-                        {"source_type": "code", "source_uri": "code:src/app.py"}
-                    ],
+                    "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
                 }
             ),
         ]
@@ -318,11 +376,16 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
 
     steps_by_sequence = sorted(trace_repo.steps.values(), key=lambda step: step.sequence)
     assert [step.step_type for step in steps_by_sequence] == [
-        AgentStepType.BUILD_TEST_PLAN,
-        AgentStepType.TOOL_CALL,
-        AgentStepType.TOOL_CALL,
-        AgentStepType.TOOL_CALL,
         AgentStepType.GENERATE_QUESTIONS,
+        AgentStepType.BUILD_TEST_PLAN,
+        AgentStepType.MODEL_CALL,
+        AgentStepType.TOOL_CALL,
+        AgentStepType.TOOL_CALL,
+        AgentStepType.TOOL_CALL,
+        AgentStepType.MODEL_CALL,
+        AgentStepType.MODEL_CALL,
+        AgentStepType.VALIDATE_OUTPUT,
+        AgentStepType.VERIFY_EVIDENCE,
         AgentStepType.PERSIST_RESULT,
     ]
     assert all(step.status == AgentStatus.SUCCEEDED for step in steps_by_sequence)
@@ -332,7 +395,8 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
         "repo.list_symbols",
         "repo.read_symbol",
     ]
-    plan_step = steps_by_sequence[0]
+    generation_step = steps_by_sequence[0]
+    plan_step = steps_by_sequence[1]
     assert plan_step.output_summary == {
         "completion_reason": "model_finished",
         "model_turn_count": 2,
@@ -340,6 +404,24 @@ def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_pa
         "failed_tool_call_count": 0,
         "duplicate_tool_call_count": 0,
     }
+    model_steps = [step for step in steps_by_sequence if step.step_type == AgentStepType.MODEL_CALL]
+    validation_step = next(
+        step for step in steps_by_sequence if step.step_type == AgentStepType.VALIDATE_OUTPUT
+    )
+    evidence_step = next(
+        step for step in steps_by_sequence if step.step_type == AgentStepType.VERIFY_EVIDENCE
+    )
+    persist_step = steps_by_sequence[-1]
+    assert plan_step.parent_step_id == generation_step.id
+    assert model_steps[0].parent_step_id == plan_step.id
+    assert tool_steps[0].parent_step_id == model_steps[0].id
+    assert tool_steps[1].parent_step_id == tool_steps[0].id
+    assert tool_steps[2].parent_step_id == tool_steps[1].id
+    assert model_steps[1].parent_step_id == tool_steps[2].id
+    assert model_steps[2].parent_step_id == model_steps[1].id
+    assert validation_step.parent_step_id == model_steps[2].id
+    assert evidence_step.parent_step_id == validation_step.id
+    assert persist_step.parent_step_id == generation_step.id
 
     artifact_types = [artifact.artifact_type for artifact in trace_repo.artifacts]
     assert artifact_types.count(AgentArtifactType.TOOL_CALL_RESULT) == 3
@@ -382,9 +464,11 @@ def test_generated_test_run_service_marks_run_failed_on_invalid_model_output(tmp
         AgentArtifactType.RAW_MODEL_RESPONSE,
         AgentArtifactType.TRACE,
     ]
-    artifact_names = [artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts]
-    assert any("turn-1-generate-validation-error" in name for name in artifact_names)
-    assert any("turn-2-repair-validation-error" in name for name in artifact_names)
+    artifact_names = [
+        artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts
+    ]
+    assert any("generation-validate-output-1-validation-error" in name for name in artifact_names)
+    assert any("generation-validate-output-2-validation-error" in name for name in artifact_names)
 
 
 def test_generated_test_run_service_records_repair_turn_artifacts(tmp_path) -> None:
@@ -422,9 +506,11 @@ def test_generated_test_run_service_records_repair_turn_artifacts(tmp_path) -> N
         AgentArtifactType.RAW_MODEL_RESPONSE,
         AgentArtifactType.VALIDATED_OUTPUT,
     ]
-    artifact_names = [artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts]
-    assert any("turn-1-generate-validation-error" in name for name in artifact_names)
-    assert any("turn-2-repair-prompt" in name for name in artifact_names)
+    artifact_names = [
+        artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts
+    ]
+    assert any("generation-validate-output-1-validation-error" in name for name in artifact_names)
+    assert any("generation-repair-2-prompt" in name for name in artifact_names)
 
 
 def test_generated_test_run_service_records_evidence_regeneration_artifacts(tmp_path) -> None:
@@ -480,12 +566,90 @@ def test_generated_test_run_service_records_evidence_regeneration_artifacts(tmp_
         AgentArtifactType.RAW_MODEL_RESPONSE,
         AgentArtifactType.VALIDATED_OUTPUT,
     ]
-    artifact_names = [artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts]
-    assert any("turn-1-generate-evidence-error" in name for name in artifact_names)
-    assert any("turn-2-regenerate_evidence-prompt" in name for name in artifact_names)
+    artifact_names = [
+        artifact.artifact_uri.rsplit("/", maxsplit=1)[-1] for artifact in trace_repo.artifacts
+    ]
+    assert any("generation-verify-evidence-1-evidence-error" in name for name in artifact_names)
+    assert any("generation-regenerate-evidence-2-prompt" in name for name in artifact_names)
 
 
-def test_generated_test_run_service_does_not_fail_generation_step_when_persist_fails(tmp_path) -> None:
+def test_generated_test_run_service_persists_model_lifecycle_before_provider_call(
+    tmp_path,
+) -> None:
+    trace_repo = FakeAgentTraceRepo()
+    observed_step_ids: list[UUID] = []
+
+    def assert_durable_waiting_state(_request: ModelRequest) -> None:
+        model_steps = [
+            step for step in trace_repo.steps.values() if step.step_type == AgentStepType.MODEL_CALL
+        ]
+        assert len(model_steps) == 1
+        model_step = model_steps[0]
+        assert model_step.status == AgentStatus.RUNNING
+        assert model_step.activity == AgentActivity.WAITING_ON_MODEL
+        step_artifacts = [
+            artifact for artifact in trace_repo.artifacts if artifact.agent_step_id == model_step.id
+        ]
+        assert [artifact.artifact_type for artifact in step_artifacts] == [AgentArtifactType.PROMPT]
+        observed_step_ids.append(model_step.id)
+
+    provider = ObservingProvider(
+        json.dumps(
+            {
+                "type": "short_answer",
+                "question": "What matters?",
+                "expected_answer": "The evidence matters.",
+                "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+            }
+        ),
+        before_generate=assert_durable_waiting_state,
+    )
+    service = GeneratedTestRunService(
+        provider=provider,
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=FakeGeneratedTestRepo(),
+    )
+
+    service.generate_for_context_packs([build_context_pack(tmp_path)])
+
+    assert len(observed_step_ids) == 1
+    completed_step = trace_repo.steps[observed_step_ids[0]]
+    assert completed_step.status == AgentStatus.SUCCEEDED
+    assert completed_step.activity is None
+
+
+def test_generated_test_run_service_records_failed_model_call(tmp_path) -> None:
+    trace_repo = FakeAgentTraceRepo()
+    provider = FailingProvider(RuntimeError("provider unavailable"))
+    service = GeneratedTestRunService(
+        provider=provider,
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=FakeGeneratedTestRepo(),
+    )
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        service.generate_for_context_packs([build_context_pack(tmp_path)])
+
+    model_step = next(
+        step for step in trace_repo.steps.values() if step.step_type == AgentStepType.MODEL_CALL
+    )
+    assert model_step.status == AgentStatus.FAILED
+    assert model_step.activity is None
+    assert model_step.output_summary["error_type"] == "RuntimeError"
+    assert [
+        artifact.artifact_type
+        for artifact in trace_repo.artifacts
+        if artifact.agent_step_id == model_step.id
+    ] == [AgentArtifactType.PROMPT, AgentArtifactType.TRACE]
+
+
+def test_generated_test_run_service_does_not_fail_generation_step_when_persist_fails(
+    tmp_path,
+) -> None:
     trace_repo = FakeAgentTraceRepo()
     service = GeneratedTestRunService(
         provider=FakeProvider(

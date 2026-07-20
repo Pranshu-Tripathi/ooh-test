@@ -7,7 +7,18 @@ export type AgentStatus =
   | "validating"
   | "succeeded"
   | "retrying"
-  | "failed";
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type AgentActivity =
+  | "planning"
+  | "waiting_on_model"
+  | "executing_tool"
+  | "validating"
+  | "verifying_evidence"
+  | "persisting"
+  | "retrying";
 
 export type Repository = {
   id: string;
@@ -151,9 +162,13 @@ export type AgentRun = {
 export type AgentStep = {
   id: string;
   agent_run_id: string;
+  parent_step_id: string | null;
+  context_pack_id: string | null;
   step_type: string;
   status: AgentStatus;
+  activity: AgentActivity | null;
   sequence: number;
+  iteration: number | null;
   input_summary: Record<string, unknown>;
   output_summary: Record<string, unknown>;
   warning_summary: Record<string, unknown>[];
@@ -169,6 +184,24 @@ export type AgentArtifact = {
   artifact_uri: string;
   content_hash: string | null;
   created_at: string;
+};
+
+export type ExecutionEvent = {
+  id: number;
+  repository_id: string | null;
+  job_id: string | null;
+  agent_run_id: string | null;
+  agent_step_id: string | null;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AgentRunSnapshot = {
+  run: AgentRun;
+  steps: AgentStep[];
+  artifacts: AgentArtifact[];
+  last_event_id: number;
 };
 
 export type ProvenanceRef = {

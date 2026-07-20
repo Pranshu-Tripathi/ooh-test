@@ -44,6 +44,7 @@ class DriftSeverity(StrEnum):
 
 
 class AgentRunType(StrEnum):
+    REPOSITORY_INGESTION = "repository_ingestion_run"
     DRIFT_ANALYSIS = "drift_analysis_run"
     TEST_GENERATION = "test_generation_run"
     ANSWER_JUDGING = "answer_judging_run"
@@ -58,12 +59,30 @@ class AgentStatus(StrEnum):
     SUCCEEDED = "succeeded"
     RETRYING = "retrying"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+    INTERRUPTED = "interrupted"
+
+
+class AgentActivity(StrEnum):
+    PLANNING = "planning"
+    WAITING_ON_MODEL = "waiting_on_model"
+    EXECUTING_TOOL = "executing_tool"
+    VALIDATING = "validating"
+    VERIFYING_EVIDENCE = "verifying_evidence"
+    PERSISTING = "persisting"
+    RETRYING = "retrying"
 
 
 class AgentStepType(StrEnum):
+    RESOLVE_REPOSITORY_SOURCE = "resolve_repository_source"
     LOAD_REPOSITORY_STATE = "load_repository_state"
+    INSPECT_REPOSITORY_SNAPSHOT = "inspect_repository_snapshot"
+    BUILD_STRUCTURAL_INDEX = "build_structural_index"
+    COMPUTE_DRIFT = "compute_drift"
+    DISCOVER_GUIDANCE = "discover_guidance"
     BUILD_TEST_PLAN = "build_test_plan"
     BUILD_CONTEXT_PACK = "build_context_pack"
+    MODEL_CALL = "model_call"
     TOOL_CALL = "tool_call"
     GENERATE_QUESTIONS = "generate_questions"
     VALIDATE_OUTPUT = "validate_output"
@@ -73,6 +92,16 @@ class AgentStepType(StrEnum):
     BUILD_GRADING_CONTEXT = "build_grading_context"
     JUDGE_ANSWER = "judge_answer"
     SUGGEST_LEARNING = "suggest_learning"
+
+
+class ExecutionEventType(StrEnum):
+    RUN_CREATED = "run_created"
+    RUN_STATUS_CHANGED = "run_status_changed"
+    STEP_CREATED = "step_created"
+    STEP_STATUS_CHANGED = "step_status_changed"
+    STEP_ACTIVITY_CHANGED = "step_activity_changed"
+    ARTIFACT_CREATED = "artifact_created"
+    JOB_STATUS_CHANGED = "job_status_changed"
 
 
 class AgentArtifactType(StrEnum):
