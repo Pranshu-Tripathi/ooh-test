@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ooh.agent.contracts import GeneratedTestPublicPayload, generated_test_public_payload
 from ooh.db.models import (
     AttentionFocusAreaRead,
     AttentionProfileRead,
@@ -191,8 +192,7 @@ class GeneratedTestResponse(BaseModel):
     agent_run_id: UUID | None
     context_pack_id: UUID | None
     category: str
-    test_payload: dict[str, Any]
-    evidence_refs: list[dict[str, Any]]
+    presentation_payload: GeneratedTestPublicPayload
     prompt_version: str | None
     created_at: datetime
 
@@ -206,8 +206,7 @@ class GeneratedTestResponse(BaseModel):
             agent_run_id=generated_test.agent_run_id,
             context_pack_id=generated_test.context_pack_id,
             category=generated_test.category.value,
-            test_payload=generated_test.test_payload,
-            evidence_refs=generated_test.evidence_refs,
+            presentation_payload=generated_test_public_payload(generated_test.test_payload),
             prompt_version=generated_test.prompt_version,
             created_at=generated_test.created_at,
         )

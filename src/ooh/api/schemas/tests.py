@@ -5,30 +5,14 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel
 
+from ooh.agent.contracts import GeneratedTestGradingPayload, SubmittedAnswerPayload
 from ooh.db.models import SavedLearningRead, TestAnswerRead, TestResultRead, TestResultStatus
 from ooh.db.models.jobs import JobRead, JobStatus, JobType
 
 
-class TestAnswerSubmitRequest(BaseModel):
-    answer_text: str | None = Field(default=None, min_length=1, max_length=8000)
-    selected_option_ids: list[str] = Field(default_factory=list, max_length=20)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def answer_must_have_content(self) -> "TestAnswerSubmitRequest":
-        if self.answer_text is None and not self.selected_option_ids:
-            raise ValueError("answer_text or selected_option_ids is required")
-        return self
-
-    def to_payload(self) -> dict[str, Any]:
-        payload: dict[str, Any] = {"metadata": self.metadata}
-        if self.answer_text is not None:
-            payload["answer_text"] = self.answer_text
-        if self.selected_option_ids:
-            payload["selected_option_ids"] = self.selected_option_ids
-        return payload
+TestAnswerSubmitRequest = SubmittedAnswerPayload
 
 
 class JobResponse(BaseModel):
@@ -80,11 +64,17 @@ class TestResultResponse(BaseModel):
     score: Decimal
     status: TestResultStatus
     feedback: dict[str, Any]
+    grading_guidance: GeneratedTestGradingPayload | None = None
     alert_flag: bool
     created_at: datetime
 
     @classmethod
-    def from_record(cls, result: TestResultRead) -> "TestResultResponse":
+    def from_record(
+        cls,
+        result: TestResultRead,
+        *,
+        grading_guidance: dict[str, Any] | None = None,
+    ) -> "TestResultResponse":
         return cls(
             id=result.id,
             generated_test_id=result.generated_test_id,
@@ -93,6 +83,7 @@ class TestResultResponse(BaseModel):
             score=result.score,
             status=result.status,
             feedback=result.feedback,
+            grading_guidance=grading_guidance,
             alert_flag=result.alert_flag,
             created_at=result.created_at,
         )

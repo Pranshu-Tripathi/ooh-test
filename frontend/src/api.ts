@@ -16,6 +16,7 @@ import type {
   RuntimeConfig,
   SavedLearning,
   TestAnswer,
+  TestAnswerPayload,
   TestResult
 } from "./types";
 
@@ -131,9 +132,9 @@ export const api = {
     request<TestAnswer[]>(`/generated-tests/${generatedTestId}/answers`),
   listResults: (generatedTestId: string) =>
     request<TestResult[]>(`/generated-tests/${generatedTestId}/results`),
-  submitAnswer: (generatedTestId: string, answerText: string) =>
+  submitAnswer: (generatedTestId: string, answerPayload: TestAnswerPayload) =>
     request<{ answer: TestAnswer; judge_job: Job }>(`/generated-tests/${generatedTestId}/answers`, {
       method: "POST",
-      body: { answer_text: answerText }
+      body: answerPayload
     })
 };

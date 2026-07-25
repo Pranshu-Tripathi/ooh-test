@@ -4,6 +4,7 @@ import {
   Boxes,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   CircleDashed,
   Clock3,
@@ -61,6 +62,7 @@ import type {
   RepositorySchedule,
   SavedLearning,
   TestAnswer,
+  TestAnswerPayload,
   TestResult
 } from "./types";
 
@@ -89,6 +91,26 @@ type LiveTraceState = {
   loading: boolean;
   error: string | null;
   connection: TraceConnection;
+};
+
+type AnswerDraft = {
+  responseText: string;
+  selectedOptionId: string;
+  selectedOptionIds: string[];
+};
+
+type TestSessionProgress = Record<
+  string,
+  {
+    answers: TestAnswer[];
+    results: TestResult[];
+  }
+>;
+
+const EMPTY_ANSWER_DRAFT: AnswerDraft = {
+  responseText: "",
+  selectedOptionId: "",
+  selectedOptionIds: []
 };
 
 const TRACE_EVENT_TYPES = [
@@ -637,27 +659,36 @@ function GeneratedTestsTab({
       return acc;
     }, {});
   }, [results]);
+  const testSets = useMemo(() => groupGeneratedTests(tests.data ?? []), [tests.data]);
 
   return (
     <section className="panel">
       <PanelHeader title="Generated tests" icon={<FileText size={17} />} />
       <AsyncBoundary state={tests}>
         <div className="table-list">
-          {(tests.data ?? []).map((test) => (
-            <a
-              className="table-row tall"
-              href={`#/generated-tests/${test.id}?repositoryId=${repositoryId}`}
-              key={test.id}
-            >
-              <div>
-                <strong>{testTitle(test)}</strong>
-                <span className="muted">{labelize(test.category)}</span>
-              </div>
-              <span>{test.evidence_refs.length} refs</span>
-              <span>{resultsByTest[test.id]?.length ?? 0} results</span>
-              <ChevronRight size={16} />
-            </a>
-          ))}
+          {testSets.map((testSet) => {
+            const firstTest = testSet.tests[0];
+            const resultCount = testSet.tests.reduce(
+              (count, test) => count + (resultsByTest[test.id]?.length ?? 0),
+              0
+            );
+            const categories = [...new Set(testSet.tests.map((test) => labelize(test.category)))];
+            return (
+              <a
+                className="table-row tall"
+                href={`#/generated-tests/${firstTest.id}?repositoryId=${repositoryId}`}
+                key={testSet.id}
+              >
+                <div>
+                  <strong>{testTitle(firstTest)}</strong>
+                  <span className="muted">{categories.join(" · ")}</span>
+                </div>
+                <span>{testSet.tests.length} questions</span>
+                <span>{resultCount} judged</span>
+                <ChevronRight size={16} />
+              </a>
+            );
+          })}
           {tests.data?.length === 0 ? <div className="empty-state">No generated tests</div> : null}
         </div>
       </AsyncBoundary>
@@ -1671,67 +1702,262 @@ function GeneratedTestPage({
     () => (repositoryId ? api.listGeneratedTests(repositoryId) : Promise.resolve([])),
     [repositoryId]
   );
-  const answers = useAsyncData(() => api.listAnswers(generatedTestId), [generatedTestId]);
-  const results = useAsyncData(() => api.listResults(generatedTestId), [generatedTestId]);
-  const [answerText, setAnswerText] = useState("");
+  const selectedTest = tests.data?.find((item) => item.id === generatedTestId) ?? null;
+  const sessionTests = useMemo(() => {
+    if (!selectedTest) {
+      return [];
+    }
+    const siblings = selectedTest.agent_run_id
+      ? (tests.data ?? []).filter((item) => item.agent_run_id === selectedTest.agent_run_id)
+      : [selectedTest];
+    return [...siblings].sort(
+      (left, right) =>
+        left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id)
+    );
+  }, [selectedTest, tests.data]);
+  const sessionKey = sessionTests.map((test) => test.id).join(",");
+  const progress = useAsyncData<TestSessionProgress>(async () => {
+    const entries = await Promise.all(
+      sessionTests.map(async (test) => {
+        const [answers, results] = await Promise.all([
+          api.listAnswers(test.id),
+          api.listResults(test.id)
+        ]);
+        return [test.id, { answers, results }] as const;
+      })
+    );
+    return Object.fromEntries(entries);
+  }, [sessionKey]);
+  const [activeTestId, setActiveTestId] = useState(generatedTestId);
+  const [drafts, setDrafts] = useState<Record<string, AnswerDraft>>({});
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [judgeJob, setJudgeJob] = useState<Job | null>(null);
-  const test = tests.data?.find((item) => item.id === generatedTestId) ?? null;
+  const [judgeJobs, setJudgeJobs] = useState<Record<string, Job>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const test =
+    sessionTests.find((item) => item.id === activeTestId) ??
+    sessionTests.find((item) => item.id === generatedTestId) ??
+    null;
+  const currentIndex = test ? sessionTests.findIndex((item) => item.id === test.id) : -1;
+  const currentProgress = test ? progress.data?.[test.id] : null;
+  const submittedAnswer = currentProgress?.answers[0] ?? null;
+  const draft =
+    (test ? drafts[test.id] : null) ??
+    draftFromSubmittedAnswer(submittedAnswer) ??
+    EMPTY_ANSWER_DRAFT;
+  const latestResult = currentProgress?.results[0] ?? null;
+  const judgeJob = test ? judgeJobs[test.id] ?? null : null;
+  const answerPayload = test ? answerPayloadFromDraft(test, draft) : null;
+  const alreadySubmitted = Boolean(submittedAnswer);
+
+  useEffect(() => {
+    setActiveTestId(generatedTestId);
+    setSubmitError(null);
+  }, [generatedTestId]);
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!test || !answerPayload || alreadySubmitted) {
+      return;
+    }
     setSubmitError(null);
+    setSubmitting(true);
     try {
-      const result = await api.submitAnswer(generatedTestId, answerText);
-      setJudgeJob(result.judge_job);
-      setAnswerText("");
-      await answers.reload();
-      await results.reload();
+      const result = await api.submitAnswer(test.id, answerPayload);
+      setJudgeJobs((current) => ({ ...current, [test.id]: result.judge_job }));
+      await progress.reload();
     } catch (exc) {
       setSubmitError(errorMessage(exc));
+    } finally {
+      setSubmitting(false);
     }
+  }
+
+  function updateDraft(nextDraft: AnswerDraft) {
+    if (!test) {
+      return;
+    }
+    setDrafts((current) => ({ ...current, [test.id]: nextDraft }));
+  }
+
+  function goToQuestion(index: number) {
+    const nextTest = sessionTests[index];
+    if (!nextTest) {
+      return;
+    }
+    setActiveTestId(nextTest.id);
+    setSubmitError(null);
+    navigate(
+      `/generated-tests/${nextTest.id}${
+        repositoryId ? `?repositoryId=${encodeURIComponent(repositoryId)}` : ""
+      }`
+    );
   }
 
   return (
     <div className="page stack">
-      <PageTitle icon={<FileText size={22} />} title="Generated test" eyebrow={shortId(generatedTestId)} />
-      <div className="two-column wide-right">
+      <PageTitle
+        icon={<FileText size={22} />}
+        title="Test session"
+        eyebrow={
+          currentIndex >= 0
+            ? `Question ${currentIndex + 1} of ${sessionTests.length}`
+            : shortId(generatedTestId)
+        }
+      />
+      <section className="panel test-progress-panel">
+        <div className="test-progress-header">
+          <div>
+            <strong>{sessionTests.length || 1} question test set</strong>
+            <span className="muted">
+              {selectedTest?.agent_run_id
+                ? `Agent run ${shortId(selectedTest.agent_run_id)}`
+                : "Single generated question"}
+            </span>
+          </div>
+          <button onClick={() => void progress.reload()} type="button">
+            <RefreshCw size={14} className={progress.loading ? "spin" : undefined} />
+            Refresh results
+          </button>
+        </div>
+        <div className="question-progress" aria-label="Test question progress">
+          {sessionTests.map((sessionTest, index) => {
+            const state = testSessionState(
+              progress.data?.[sessionTest.id],
+              drafts[sessionTest.id]
+            );
+            return (
+              <button
+                aria-current={sessionTest.id === test?.id ? "step" : undefined}
+                className={`question-progress-step ${
+                  sessionTest.id === test?.id ? "active" : ""
+                } ${state}`}
+                key={sessionTest.id}
+                onClick={() => goToQuestion(index)}
+                type="button"
+              >
+                <span>{index + 1}</span>
+                <small>{labelize(state)}</small>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      <div className="test-session-layout">
         <section className="panel">
-          <PanelHeader title={test ? testTitle(test) : "Test payload"} icon={<FileText size={17} />} />
+          <PanelHeader
+            title={test ? labelize(test.category) : "Question"}
+            icon={<FileText size={17} />}
+          />
           {test ? (
-            <div className="stack">
-              <div className="row wrap">
-                <StatusPill status={labelize(test.category)} />
-                {test.agent_run_id ? (
-                  <a className="inline-link" href={`#/agent-runs/${test.agent_run_id}`}>
-                    <Network size={14} />
-                    Agent run
-                  </a>
-                ) : null}
+            <div className="question-surface">
+              <div className="question-meta">
+                <StatusPill status={labelize(test.presentation_payload.type)} />
+                <span className="muted">
+                  Question {currentIndex + 1} of {sessionTests.length}
+                </span>
               </div>
-              <JsonBlock payload={test.test_payload} />
-              <PanelSubhead title="Evidence" />
-              <JsonBlock payload={test.evidence_refs} />
+              <h2 className="question-copy">{test.presentation_payload.question}</h2>
+              <form className="test-answer-form" onSubmit={onSubmit}>
+                {test.presentation_payload.type === "short_answer" ? (
+                  <label>
+                    Your answer
+                    <textarea
+                      disabled={alreadySubmitted}
+                      placeholder="Write a concise answer supported by the repository context."
+                      required
+                      value={draft.responseText}
+                      onChange={(event) =>
+                        updateDraft({ ...draft, responseText: event.target.value })
+                      }
+                    />
+                  </label>
+                ) : (
+                  <fieldset className="answer-options" disabled={alreadySubmitted}>
+                    <legend>
+                      {test.presentation_payload.type === "mcq_single"
+                        ? "Choose one answer"
+                        : "Choose all that apply"}
+                    </legend>
+                    {test.presentation_payload.options.map((option) => {
+                      const isSingle = test.presentation_payload.type === "mcq_single";
+                      const checked = isSingle
+                        ? draft.selectedOptionId === option.id
+                        : draft.selectedOptionIds.includes(option.id);
+                      return (
+                        <label className="answer-option" key={option.id}>
+                          <input
+                            checked={checked}
+                            name={`answer-${test.id}`}
+                            onChange={(event) => {
+                              if (isSingle) {
+                                updateDraft({ ...draft, selectedOptionId: option.id });
+                                return;
+                              }
+                              const selectedOptionIds = event.target.checked
+                                ? [...draft.selectedOptionIds, option.id]
+                                : draft.selectedOptionIds.filter(
+                                    (optionId) => optionId !== option.id
+                                  );
+                              updateDraft({ ...draft, selectedOptionIds });
+                            }}
+                            type={isSingle ? "radio" : "checkbox"}
+                          />
+                          <span className="option-id">{option.id}</span>
+                          <span>{option.text}</span>
+                        </label>
+                      );
+                    })}
+                  </fieldset>
+                )}
+                {submitError ? <InlineError message={submitError} /> : null}
+                {alreadySubmitted ? (
+                  <div className="notice">
+                    <CheckCircle2 size={15} />
+                    Answer submitted. Results appear after the judge job completes.
+                  </div>
+                ) : null}
+                <div className="question-actions">
+                  <button
+                    disabled={currentIndex <= 0}
+                    onClick={() => goToQuestion(currentIndex - 1)}
+                    type="button"
+                  >
+                    <ChevronLeft size={15} />
+                    Previous
+                  </button>
+                  <button
+                    className="primary action-button"
+                    disabled={!answerPayload || alreadySubmitted || submitting}
+                    type="submit"
+                  >
+                    {submitting ? <CircleDashed className="spin" size={15} /> : <Send size={15} />}
+                    {alreadySubmitted ? "Submitted" : "Submit answer"}
+                  </button>
+                  <button
+                    disabled={currentIndex < 0 || currentIndex >= sessionTests.length - 1}
+                    onClick={() => goToQuestion(currentIndex + 1)}
+                    type="button"
+                  >
+                    Next
+                    <ChevronRight size={15} />
+                  </button>
+                </div>
+              </form>
             </div>
           ) : (
-            <div className="empty-state">Test payload unavailable</div>
+            <AsyncBoundary state={tests}>
+              <div className="empty-state">
+                {repositoryId
+                  ? "Generated test unavailable"
+                  : "Open this test from its repository to load the complete test set."}
+              </div>
+            </AsyncBoundary>
           )}
         </section>
 
         <section className="panel">
-          <PanelHeader title="Answer and results" icon={<Send size={17} />} />
-          <form className="answer-form" onSubmit={onSubmit}>
-            <textarea
-              required
-              value={answerText}
-              onChange={(event) => setAnswerText(event.target.value)}
-            />
-            {submitError ? <InlineError message={submitError} /> : null}
-            <button className="primary action-button" type="submit">
-              <Send size={15} />
-              Submit
-            </button>
-          </form>
+          <PanelHeader title="Result" icon={<CheckCircle2 size={17} />} />
           {judgeJob ? (
             <div className="notice">
               <Clock3 size={15} />
@@ -1739,32 +1965,146 @@ function GeneratedTestPage({
               <StatusPill status={judgeJob.status} />
             </div>
           ) : null}
-          <PanelSubhead title="Results" />
-          <AsyncBoundary state={results}>
-            <div className="stack">
-              {(results.data ?? []).map((result) => (
-                <div className="result-card" key={result.id}>
-                  <div className="item-card-header">
-                    <strong>{String(result.score)}</strong>
-                    <StatusPill status={result.status} />
-                  </div>
-                  <JsonPreview payload={result.feedback} />
-                </div>
-              ))}
-              {results.data?.length === 0 ? <div className="empty-state">No results</div> : null}
-            </div>
-          </AsyncBoundary>
-          <PanelSubhead title="Answers" />
-          <AsyncBoundary state={answers}>
-            <div className="stack">
-              {(answers.data ?? []).map((answer: TestAnswer) => (
-                <JsonPreview key={answer.id} payload={answer.answer_payload} />
-              ))}
-              {answers.data?.length === 0 ? <div className="empty-state">No answers</div> : null}
-            </div>
+          <AsyncBoundary state={progress}>
+            {latestResult ? (
+              <TestResultSummary result={latestResult} test={test} />
+            ) : (
+              <div className="empty-state result-empty">
+                {alreadySubmitted
+                  ? "The answer is complete and waiting to be judged. Refresh when the judge job finishes."
+                  : "Submit an answer to receive a score, feedback, and answer guidance."}
+              </div>
+            )}
           </AsyncBoundary>
         </section>
       </div>
+
+      {test ? (
+        <section className="panel test-inspection">
+          <details>
+            <summary>Evidence and provenance</summary>
+            <div className="inspection-content">
+              {test.agent_run_id ? (
+                <a className="inline-link" href={`#/agent-runs/${test.agent_run_id}`}>
+                  <Network size={14} />
+                  Open generation trace
+                </a>
+              ) : null}
+              <div className="source-list">
+                {test.presentation_payload.evidence_refs.map((evidence, index) => (
+                  <div className="evidence-row" key={`${evidence.source_uri}-${index}`}>
+                    <strong>{evidence.source_type}</strong>
+                    <span>{evidence.source_uri}</span>
+                    {evidence.content_hash ? <code>{shortSha(evidence.content_hash)}</code> : null}
+                  </div>
+                ))}
+                {test.presentation_payload.evidence_refs.length === 0 ? (
+                  <span className="muted">No evidence references were attached.</span>
+                ) : null}
+              </div>
+            </div>
+          </details>
+          <details>
+            <summary>Advanced JSON inspection</summary>
+            <div className="inspection-content">
+              <PanelSubhead title="Public presentation payload" />
+              <JsonBlock payload={test.presentation_payload} />
+              {submittedAnswer ? (
+                <>
+                  <PanelSubhead title="Submitted answer payload" />
+                  <JsonBlock payload={submittedAnswer.answer_payload} />
+                </>
+              ) : null}
+              {latestResult ? (
+                <>
+                  <PanelSubhead title="Judged result payload" />
+                  <JsonBlock payload={latestResult} />
+                </>
+              ) : null}
+            </div>
+          </details>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function TestResultSummary({
+  result,
+  test
+}: {
+  result: TestResult;
+  test: GeneratedTest | null;
+}) {
+  const feedback =
+    typeof result.feedback.feedback === "string" ? result.feedback.feedback : null;
+  const missedConcepts = Array.isArray(result.feedback.missed_concepts)
+    ? result.feedback.missed_concepts.filter(
+        (concept): concept is string => typeof concept === "string"
+      )
+    : [];
+  const guidance = result.grading_guidance;
+  const correctOptions =
+    guidance && guidance.type !== "short_answer" && test?.presentation_payload.type !== "short_answer"
+      ? test?.presentation_payload.options.filter((option) =>
+          guidance.correct_option_ids.includes(option.id)
+        )
+      : [];
+
+  return (
+    <div className="result-summary">
+      <div className="result-score">
+        <div>
+          <span>Score</span>
+          <strong>{formatScore(result.score)}</strong>
+        </div>
+        <StatusPill status={result.status} />
+      </div>
+      {feedback ? (
+        <div className="feedback-block">
+          <PanelSubhead title="Judge feedback" />
+          <p>{feedback}</p>
+        </div>
+      ) : null}
+      {missedConcepts.length ? (
+        <div className="feedback-block">
+          <PanelSubhead title="Missed concepts" />
+          <ul>
+            {missedConcepts.map((concept) => (
+              <li key={concept}>{concept}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      {guidance ? (
+        <div className="guidance-block">
+          <PanelSubhead title="Answer guidance" />
+          {guidance.type === "short_answer" ? (
+            <p>{guidance.expected_answer}</p>
+          ) : (
+            <ul>
+              {(correctOptions ?? []).map((option) => (
+                <li key={option.id}>
+                  <strong>{option.id}</strong> — {option.text}
+                </li>
+              ))}
+            </ul>
+          )}
+          {guidance.explanation ? <p className="muted">{guidance.explanation}</p> : null}
+          {guidance.rubric.length ? (
+            <details className="rubric-details">
+              <summary>View grading rubric</summary>
+              <ul>
+                {guidance.rubric.map((criterion) => (
+                  <li key={criterion.criterion}>
+                    <strong>{criterion.criterion}</strong>: {criterion.description}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -2647,15 +2987,94 @@ function eventPayloadRecord<T>(event: ExecutionEvent, key: string): T | null {
   return value && typeof value === "object" ? (value as T) : null;
 }
 
+function groupGeneratedTests(tests: GeneratedTest[]) {
+  const grouped = tests.reduce<Record<string, GeneratedTest[]>>((groups, test) => {
+    const groupId = test.agent_run_id ?? `generated-test:${test.id}`;
+    groups[groupId] = [...(groups[groupId] ?? []), test];
+    return groups;
+  }, {});
+
+  return Object.entries(grouped)
+    .map(([id, groupedTests]) => ({
+      id,
+      tests: [...groupedTests].sort(
+        (left, right) =>
+          left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id)
+      )
+    }))
+    .sort((left, right) => {
+      const leftCreatedAt = left.tests.at(-1)?.created_at ?? "";
+      const rightCreatedAt = right.tests.at(-1)?.created_at ?? "";
+      return rightCreatedAt.localeCompare(leftCreatedAt);
+    });
+}
+
+function draftFromSubmittedAnswer(answer: TestAnswer | null): AnswerDraft | null {
+  if (!answer) {
+    return null;
+  }
+  if (answer.answer_payload.type === "short_answer") {
+    return {
+      ...EMPTY_ANSWER_DRAFT,
+      responseText: answer.answer_payload.response_text
+    };
+  }
+  if (answer.answer_payload.type === "mcq_single") {
+    return {
+      ...EMPTY_ANSWER_DRAFT,
+      selectedOptionId: answer.answer_payload.selected_option_id
+    };
+  }
+  return {
+    ...EMPTY_ANSWER_DRAFT,
+    selectedOptionIds: answer.answer_payload.selected_option_ids
+  };
+}
+
+function answerPayloadFromDraft(
+  test: GeneratedTest,
+  draft: AnswerDraft
+): TestAnswerPayload | null {
+  if (test.presentation_payload.type === "short_answer") {
+    const responseText = draft.responseText.trim();
+    return responseText ? { type: "short_answer", response_text: responseText } : null;
+  }
+  if (test.presentation_payload.type === "mcq_single") {
+    return draft.selectedOptionId
+      ? { type: "mcq_single", selected_option_id: draft.selectedOptionId }
+      : null;
+  }
+  return draft.selectedOptionIds.length
+    ? { type: "mcq_multi", selected_option_ids: draft.selectedOptionIds }
+    : null;
+}
+
+function testSessionState(
+  progress: TestSessionProgress[string] | undefined,
+  draft: AnswerDraft | undefined
+) {
+  if (progress?.results.length) {
+    return "judged";
+  }
+  if (progress?.answers.length) {
+    return "completed";
+  }
+  if (
+    draft &&
+    (draft.responseText.trim() || draft.selectedOptionId || draft.selectedOptionIds.length)
+  ) {
+    return "in_progress";
+  }
+  return "unanswered";
+}
+
 function testTitle(test: GeneratedTest) {
-  const payload = test.test_payload;
-  const title =
-    payload.title ??
-    payload.question ??
-    payload.prompt ??
-    payload.name ??
-    `${labelize(test.category)} test`;
-  return typeof title === "string" ? title : `${labelize(test.category)} test`;
+  return test.presentation_payload.question || `${labelize(test.category)} test`;
+}
+
+function formatScore(value: string) {
+  const score = Number.parseFloat(value);
+  return Number.isFinite(score) ? `${Math.round(score * 100)}%` : value;
 }
 
 function errorMessage(exc: unknown) {

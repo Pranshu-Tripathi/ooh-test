@@ -27,7 +27,7 @@ def test_build_answer_judging_request_asks_for_json() -> None:
     request = build_answer_judging_request(
         model="deepseek-r1:8b",
         test_payload={"type": "short_answer", "question": "What matters?"},
-        answer_payload={"answer_text": "Evidence matters."},
+        answer_payload={"type": "short_answer", "response_text": "Evidence matters."},
         evidence_refs=[{"source_type": "code", "source_uri": "code:src/app.py"}],
     )
 
@@ -48,7 +48,7 @@ def test_build_answer_judging_repair_request_includes_error_and_invalid_output()
     request = build_answer_judging_repair_request(
         model="deepseek-r1:8b",
         test_payload={"type": "short_answer"},
-        answer_payload={"answer_text": "ok"},
+        answer_payload={"type": "short_answer", "response_text": "ok"},
         evidence_refs=[],
         invalid_output='{"score": 2}',
         validation_error="score must be less than or equal to 1",
@@ -127,7 +127,7 @@ def test_answer_judging_loop_repairs_invalid_payload() -> None:
 
     result = loop.run(
         test_payload={"type": "short_answer", "question": "What matters?"},
-        answer_payload={"answer_text": "Some of it."},
+        answer_payload={"type": "short_answer", "response_text": "Some of it."},
         evidence_refs=[],
     )
 
@@ -144,7 +144,7 @@ def test_answer_judging_loop_fails_after_repair_budget() -> None:
     with pytest.raises(AnswerJudgingPayloadError, match="after 2 attempts"):
         loop.run(
             test_payload={"type": "short_answer", "question": "What matters?"},
-            answer_payload={"answer_text": "Some of it."},
+            answer_payload={"type": "short_answer", "response_text": "Some of it."},
             evidence_refs=[],
         )
 

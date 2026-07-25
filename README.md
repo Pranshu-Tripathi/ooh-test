@@ -146,8 +146,12 @@ Submit an answer and enqueue judging:
 ```bash
 curl -X POST http://localhost:8500/generated-tests/{generated_test_id}/answers \
   -H "content-type: application/json" \
-  -d '{"answer_text":"The component reads the repository snapshot and builds bounded context."}'
+  -d '{"type":"short_answer","response_text":"The component reads the repository snapshot and builds bounded context."}'
 ```
+
+Single-choice answers use `{"type":"mcq_single","selected_option_id":"A"}` and multi-choice
+answers use `{"type":"mcq_multi","selected_option_ids":["A","C"]}`. Generated-test responses expose
+only the public `presentation_payload`; grading guidance is returned with a judged result.
 
 After the judge job succeeds, inspect the scored result and any saved learnings:
 

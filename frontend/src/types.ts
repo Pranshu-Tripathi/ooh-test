@@ -112,6 +112,31 @@ export type ContextPack = {
   created_at: string;
 };
 
+export type GeneratedTestType = "short_answer" | "mcq_single" | "mcq_multi";
+
+export type TestEvidenceRef = {
+  source_type: string;
+  source_uri: string;
+  content_hash?: string | null;
+  context_pack_id?: string | null;
+};
+
+export type TestOption = {
+  id: string;
+  text: string;
+};
+
+type GeneratedTestPresentationBase = {
+  schema_version: number;
+  question: string;
+  evidence_refs: TestEvidenceRef[];
+};
+
+export type GeneratedTestPresentation =
+  | (GeneratedTestPresentationBase & { type: "short_answer" })
+  | (GeneratedTestPresentationBase & { type: "mcq_single"; options: TestOption[] })
+  | (GeneratedTestPresentationBase & { type: "mcq_multi"; options: TestOption[] });
+
 export type GeneratedTest = {
   id: string;
   repository_id: string;
@@ -120,18 +145,34 @@ export type GeneratedTest = {
   agent_run_id: string | null;
   context_pack_id: string | null;
   category: string;
-  test_payload: Record<string, unknown>;
-  evidence_refs: Record<string, unknown>[];
+  presentation_payload: GeneratedTestPresentation;
   prompt_version: string | null;
   created_at: string;
 };
 
+export type TestAnswerPayload =
+  | { type: "short_answer"; response_text: string; metadata?: Record<string, unknown> }
+  | { type: "mcq_single"; selected_option_id: string; metadata?: Record<string, unknown> }
+  | { type: "mcq_multi"; selected_option_ids: string[]; metadata?: Record<string, unknown> };
+
 export type TestAnswer = {
   id: string;
   generated_test_id: string;
-  answer_payload: Record<string, unknown>;
+  answer_payload: TestAnswerPayload;
   submitted_at: string;
 };
+
+type TestGradingGuidanceBase = {
+  rubric: Array<{ criterion: string; description: string; weight: number }>;
+  explanation?: string | null;
+};
+
+export type TestGradingGuidance =
+  | (TestGradingGuidanceBase & { type: "short_answer"; expected_answer: string })
+  | (TestGradingGuidanceBase & {
+      type: "mcq_single" | "mcq_multi";
+      correct_option_ids: string[];
+    });
 
 export type TestResult = {
   id: string;
@@ -141,6 +182,7 @@ export type TestResult = {
   score: string;
   status: string;
   feedback: Record<string, unknown>;
+  grading_guidance: TestGradingGuidance | null;
   alert_flag: boolean;
   created_at: string;
 };

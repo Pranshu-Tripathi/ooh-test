@@ -34,7 +34,7 @@ def submit_test_answer(
     try:
         submission = answer_judging_service.submit_answer(
             generated_test_id=generated_test_id,
-            answer_payload=request.to_payload(),
+            answer_payload=request.model_dump(mode="json"),
         )
     except ServiceError as exc:
         raise_http_for_service_error(exc)
@@ -63,9 +63,17 @@ def list_test_answers(generated_test_id: UUID) -> list[TestAnswerResponse]:
 def list_test_results(generated_test_id: UUID) -> list[TestResultResponse]:
     try:
         results = answer_judging_service.list_results(generated_test_id)
+        grading_guidance = (
+            answer_judging_service.get_grading_guidance(generated_test_id)
+            if results
+            else None
+        )
     except ServiceError as exc:
         raise_http_for_service_error(exc)
-    return [TestResultResponse.from_record(result) for result in results]
+    return [
+        TestResultResponse.from_record(result, grading_guidance=grading_guidance)
+        for result in results
+    ]
 
 
 @router.get(
