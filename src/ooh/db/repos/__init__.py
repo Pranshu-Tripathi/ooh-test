@@ -26,6 +26,7 @@ from ooh.db.repos.guidance_sources import GuidanceSourceRepo
 from ooh.db.repos.jobs import JobRepo
 from ooh.db.repos.repo_snapshots import RepoSnapshotRepo
 from ooh.db.repos.repositories import RepositoryRepo
+from ooh.db.repos.repository_schedules import RepositoryScheduleRepo
 from ooh.db.repos.saved_learnings import SavedLearningInput, SavedLearningRepo
 from ooh.db.repos.test_answers import TestAnswerInput, TestAnswerRepo
 from ooh.db.repos.test_results import TestResultInput, TestResultRepo
@@ -51,6 +52,7 @@ __all__ = [
     "ProvenanceRefInput",
     "RepoSnapshotRepo",
     "RepositoryRepo",
+    "RepositoryScheduleRepo",
     "SavedLearningInput",
     "SavedLearningRepo",
     "TestAnswerInput",

@@ -102,6 +102,8 @@ class ExecutionEventType(StrEnum):
     STEP_ACTIVITY_CHANGED = "step_activity_changed"
     ARTIFACT_CREATED = "artifact_created"
     JOB_STATUS_CHANGED = "job_status_changed"
+    SCHEDULE_UPDATED = "schedule_updated"
+    DRIFT_TRIGGER_EVALUATED = "drift_trigger_evaluated"
 
 
 class AgentArtifactType(StrEnum):

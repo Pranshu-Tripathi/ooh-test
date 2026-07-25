@@ -6,6 +6,7 @@ The Phase 2 development runtime uses Docker Compose with:
 
 - FastAPI API service
 - background worker service
+- drift-trigger scheduler service
 - Postgres metadata store
 - one-shot migration service
 - durable repo-local cache directory
@@ -74,6 +75,27 @@ List drift events for a repository:
 ```bash
 curl http://localhost:8500/repositories/{repository_id}/drift-events
 ```
+
+Configure an inclusive drift-score range that generates low-level tests for new commit-to-commit
+drift events. Omit `drift_max_score` for an open-ended range:
+
+```bash
+curl -X PUT http://localhost:8500/repositories/{repository_id}/schedule \
+  -H "content-type: application/json" \
+  -d '{
+    "enabled": true,
+    "drift_min_score": "25",
+    "drift_max_score": "80",
+    "pack_types": ["low_level_components"]
+  }'
+
+curl http://localhost:8500/repositories/{repository_id}/schedule
+```
+
+The scheduler records every evaluation, ignores baseline drift, and uses an idempotency key derived
+from the schedule and drift event. Enabling a schedule starts from that moment and does not replay
+older drift events. Scheduled generation remains bound to the snapshot and drift event that caused
+the trigger.
 
 Build deterministic context packs from the latest snapshot:
 
@@ -158,6 +180,19 @@ Local model calls default to a 300 second timeout. Override with
 `OOH_MODEL_TIMEOUT_SECONDS` in `.env` when running slower models or larger repositories.
 The shared inspection and generation deadline defaults to 600 seconds and can be changed with
 `OOH_AGENT_LOOP_TIMEOUT_SECONDS`.
+
+Workers claim jobs with durable leases. `OOH_WORKER_LEASE_SECONDS` must exceed the maximum bounded
+duration of a job; expired claims are recovered automatically and stale workers cannot finalize a
+reclaimed attempt. Set `OOH_WORKER_JOB_TYPES` to a comma-separated list such as
+`ingest_repository,compute_drift` when running role-specific worker replicas. Logs default to JSON
+for container collection; set `OOH_LOG_FORMAT=text` for local human-readable output.
+
+The Compose scheduler polls continuously. A future Kubernetes CronJob can run the same behavior once
+with:
+
+```bash
+python -m ooh.scheduler.main --once
+```
 
 Phase 2 is being implemented in reviewable components.
 

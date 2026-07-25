@@ -12,13 +12,14 @@ import type {
   JobDetail,
   ProvenanceRef,
   Repository,
+  RepositorySchedule,
   SavedLearning,
   TestAnswer,
   TestResult
 } from "./types";
 
 type RequestOptions = {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT";
   body?: unknown;
 };
 
@@ -78,6 +79,21 @@ export const api = {
     request<DriftEvent[]>(`/repositories/${repositoryId}/drift-events`),
   listAttentionProfiles: (repositoryId: string) =>
     request<AttentionProfile[]>(`/repositories/${repositoryId}/attention-profiles`),
+  getRepositorySchedule: (repositoryId: string) =>
+    request<RepositorySchedule | null>(`/repositories/${repositoryId}/schedule`),
+  updateRepositorySchedule: (
+    repositoryId: string,
+    payload: {
+      enabled: boolean;
+      drift_min_score: string;
+      drift_max_score: string | null;
+      pack_types: string[];
+    }
+  ) =>
+    request<RepositorySchedule>(`/repositories/${repositoryId}/schedule`, {
+      method: "PUT",
+      body: payload
+    }),
   listRepositoryResults: (repositoryId: string) =>
     request<TestResult[]>(`/repositories/${repositoryId}/test-results`),
   listLearnings: (repositoryId: string) =>

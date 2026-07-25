@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -88,7 +88,7 @@ def test_process_once_marks_failed_with_failure_result_metadata() -> None:
         "max_attempts": 3,
         "worker_id": "test-worker",
         "error_type": "RuntimeError",
-        "error_message": "model output did not match contract",
+        "public_error": "generate_test failed (RuntimeError)",
     }
 
 
@@ -119,6 +119,8 @@ def build_runner(
 ) -> JobRunner:
     runner = JobRunner.__new__(JobRunner)
     runner.worker_id = "test-worker"
+    runner.lease_duration = timedelta(minutes=30)
+    runner.job_types = None
     runner.job_service = job_service
     runner.repository_service = SimpleNamespace(mark_repository_failed=lambda _repository_id: None)
     runner.test_generation_service = test_generation_service or SimpleNamespace()
@@ -132,8 +134,16 @@ class FakeJobService:
         self.succeeded_metadata: dict[str, object] | None = None
         self.failed_metadata: dict[str, object] | None = None
 
-    def claim_next(self, *, worker_id: str) -> JobRead:
+    def claim_next(
+        self,
+        *,
+        worker_id: str,
+        lease_duration: timedelta,
+        job_types: set[JobType] | None,
+    ) -> JobRead:
         assert worker_id == "test-worker"
+        assert lease_duration == timedelta(minutes=30)
+        assert job_types is None
         return self.job
 
     def mark_succeeded(
@@ -141,8 +151,12 @@ class FakeJobService:
         job_id: object,
         *,
         result_metadata: dict[str, object] | None = None,
+        expected_worker_id: str | None = None,
+        expected_attempt_count: int | None = None,
     ) -> JobRead:
         assert job_id == self.job.id
+        assert expected_worker_id == "test-worker"
+        assert expected_attempt_count == self.job.attempt_count
         self.succeeded_metadata = result_metadata
         return self.job.model_copy(update={"status": JobStatus.SUCCEEDED})
 
@@ -152,8 +166,12 @@ class FakeJobService:
         *,
         error_summary: str,
         result_metadata: dict[str, object] | None = None,
+        expected_worker_id: str | None = None,
+        expected_attempt_count: int | None = None,
     ) -> JobRead:
         assert job_id == self.job.id
-        assert error_summary == "model output did not match contract"
+        assert error_summary == "generate_test failed (RuntimeError)"
+        assert expected_worker_id == "test-worker"
+        assert expected_attempt_count == self.job.attempt_count
         self.failed_metadata = result_metadata
         return self.job.model_copy(update={"status": JobStatus.RETRY_WAIT})

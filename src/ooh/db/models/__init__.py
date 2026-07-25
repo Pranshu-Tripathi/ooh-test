@@ -34,6 +34,12 @@ from ooh.db.models.jobs import Job, JobRead
 from ooh.db.models.provenance_refs import ProvenanceRef, ProvenanceRefRead
 from ooh.db.models.repo_snapshots import RepoSnapshot, RepoSnapshotRead
 from ooh.db.models.repositories import Repository, RepositoryRead
+from ooh.db.models.repository_schedules import (
+    DriftTriggerEvaluation,
+    DriftTriggerEvaluationRead,
+    RepositorySchedule,
+    RepositoryScheduleRead,
+)
 from ooh.db.models.saved_learnings import SavedLearning, SavedLearningRead
 from ooh.db.models.test_answers import TestAnswer, TestAnswerRead
 from ooh.db.models.test_results import TestResult, TestResultRead
@@ -64,6 +70,8 @@ __all__ = [
     "DriftEvent",
     "DriftEventRead",
     "DriftSeverity",
+    "DriftTriggerEvaluation",
+    "DriftTriggerEvaluationRead",
     "ExecutionEvent",
     "ExecutionEventCursor",
     "ExecutionEventRead",
@@ -86,6 +94,8 @@ __all__ = [
     "RepoSnapshotRead",
     "Repository",
     "RepositoryRead",
+    "RepositorySchedule",
+    "RepositoryScheduleRead",
     "RepositorySourceType",
     "RepositoryStatus",
     "SavedLearning",

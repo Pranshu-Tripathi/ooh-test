@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, log_format=settings.log_format)
     command.upgrade(build_alembic_config(), "head")
     logger.info("database migrations applied")
 

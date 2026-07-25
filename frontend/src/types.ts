@@ -49,6 +49,8 @@ export type JobDetail = Job & {
   run_after: string;
   locked_by: string | null;
   locked_at: string | null;
+  lease_expires_at: string | null;
+  idempotency_key: string | null;
   error_summary: string | null;
   updated_at: string;
 };
@@ -63,6 +65,18 @@ export type DriftEvent = {
   severity: "low" | "medium" | "high";
   breakdown: Record<string, unknown>;
   created_at: string;
+};
+
+export type RepositorySchedule = {
+  id: string;
+  repository_id: string;
+  enabled: boolean;
+  drift_min_score: string;
+  drift_max_score: string | null;
+  pack_types: string[];
+  active_since: string;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ContextPackSource = {

@@ -5,7 +5,6 @@ from sqlalchemy import select
 
 from ooh.db.connection import Database
 from ooh.db.models import (
-    Job,
     JobRead,
     JobType,
     Repository,
@@ -13,6 +12,7 @@ from ooh.db.models import (
     RepositorySourceType,
     RepositoryStatus,
 )
+from ooh.db.repos.jobs import enqueue_job
 
 
 class RepositoryRepo:
@@ -62,7 +62,8 @@ class RepositoryRepo:
             session.flush()
             session.refresh(repository)
 
-            job = Job(
+            job = enqueue_job(
+                session,
                 repository_id=repository.id,
                 job_type=JobType.INGEST_REPOSITORY,
                 payload={
@@ -71,11 +72,7 @@ class RepositoryRepo:
                     "source_uri": repository.source_uri,
                 },
             )
-            session.add(job)
-            session.flush()
-            session.refresh(job)
-
-            return RepositoryRead.model_validate(repository), JobRead.model_validate(job)
+            return RepositoryRead.model_validate(repository), job
 
     def get(self, repository_id: UUID) -> RepositoryRead | None:
         with self.db.session() as session:

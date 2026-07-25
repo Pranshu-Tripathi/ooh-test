@@ -14,15 +14,23 @@ from ooh.api.schemas.repositories import (
     RepositoryCreateRequest,
     RepositoryRegistrationResponse,
     RepositoryResponse,
+    RepositoryScheduleResponse,
+    RepositoryScheduleUpdateRequest,
 )
 from ooh.db.repos import AttentionFocusAreaInput
-from ooh.services import ServiceError, build_repository_service, build_test_generation_service
+from ooh.services import (
+    ServiceError,
+    build_repository_service,
+    build_scheduler_service,
+    build_test_generation_service,
+)
 
 router = APIRouter(prefix="/repositories", tags=["repositories"])
 repository_service = build_repository_service()
 test_generation_service = build_test_generation_service(
     repository_service=repository_service,
 )
+scheduler_service = build_scheduler_service()
 
 
 @router.post("", response_model=RepositoryRegistrationResponse, status_code=status.HTTP_201_CREATED)
@@ -83,6 +91,39 @@ def enqueue_generate_test_job(
     except ServiceError as exc:
         raise_http_for_service_error(exc)
     return JobResponse.from_record(generate_job)
+
+
+@router.get(
+    "/{repository_id}/schedule",
+    response_model=RepositoryScheduleResponse | None,
+)
+def get_repository_schedule(repository_id: UUID) -> RepositoryScheduleResponse | None:
+    try:
+        schedule = scheduler_service.get_repository_schedule(repository_id)
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
+    return RepositoryScheduleResponse.from_record(schedule) if schedule is not None else None
+
+
+@router.put(
+    "/{repository_id}/schedule",
+    response_model=RepositoryScheduleResponse,
+)
+def update_repository_schedule(
+    repository_id: UUID,
+    request: RepositoryScheduleUpdateRequest,
+) -> RepositoryScheduleResponse:
+    try:
+        schedule = scheduler_service.update_repository_schedule(
+            repository_id=repository_id,
+            enabled=request.enabled,
+            drift_min_score=request.drift_min_score,
+            drift_max_score=request.drift_max_score,
+            pack_types=request.pack_types,
+        )
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
+    return RepositoryScheduleResponse.from_record(schedule)
 
 
 @router.post(

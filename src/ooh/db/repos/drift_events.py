@@ -38,6 +38,13 @@ class DriftEventRepo:
             session.refresh(drift_event)
             return DriftEventRead.model_validate(drift_event)
 
+    def get(self, drift_event_id: UUID) -> DriftEventRead | None:
+        with self.db.session() as session:
+            drift_event = session.get(DriftEvent, drift_event_id)
+            if drift_event is None:
+                return None
+            return DriftEventRead.model_validate(drift_event)
+
     def list_for_repository(self, repository_id: UUID, *, limit: int = 50) -> list[DriftEventRead]:
         with self.db.session() as session:
             drift_events = session.scalars(

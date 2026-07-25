@@ -4,7 +4,7 @@ from pathlib import PurePath
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ooh.db.models import (
     AttentionFocusAreaRead,
@@ -20,6 +20,7 @@ from ooh.db.models import (
     JobStatus,
     JobType,
     RepositoryRead,
+    RepositoryScheduleRead,
     RepositorySourceType,
     RepositoryStatus,
 )
@@ -96,6 +97,54 @@ class RepositoryRegistrationResponse(BaseModel):
 
 class GenerateTestJobRequest(BaseModel):
     pack_types: list[ContextPackType] | None = Field(default=None, min_length=1, max_length=5)
+
+
+class RepositoryScheduleUpdateRequest(BaseModel):
+    enabled: bool = False
+    drift_min_score: Decimal = Field(default=Decimal("25"), ge=Decimal("0"))
+    drift_max_score: Decimal | None = Field(default=None, ge=Decimal("0"))
+    pack_types: list[ContextPackType] = Field(
+        default_factory=lambda: [ContextPackType.LOW_LEVEL_COMPONENTS],
+        min_length=1,
+        max_length=5,
+    )
+
+    @model_validator(mode="after")
+    def score_range_must_be_ordered(self) -> "RepositoryScheduleUpdateRequest":
+        if (
+            self.drift_max_score is not None
+            and self.drift_max_score < self.drift_min_score
+        ):
+            raise ValueError("drift_max_score must be greater than or equal to drift_min_score")
+        if len(set(self.pack_types)) != len(self.pack_types):
+            raise ValueError("pack_types must not contain duplicates")
+        return self
+
+
+class RepositoryScheduleResponse(BaseModel):
+    id: UUID
+    repository_id: UUID
+    enabled: bool
+    drift_min_score: Decimal
+    drift_max_score: Decimal | None
+    pack_types: list[ContextPackType]
+    active_since: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, schedule: RepositoryScheduleRead) -> "RepositoryScheduleResponse":
+        return cls(
+            id=schedule.id,
+            repository_id=schedule.repository_id,
+            enabled=schedule.enabled,
+            drift_min_score=schedule.drift_min_score,
+            drift_max_score=schedule.drift_max_score,
+            pack_types=schedule.pack_types,
+            active_since=schedule.active_since,
+            created_at=schedule.created_at,
+            updated_at=schedule.updated_at,
+        )
 
 
 class GeneratedTestResponse(BaseModel):

@@ -5,6 +5,7 @@ from ooh.services.factory import (
     build_job_service,
     build_learning_service,
     build_repository_service,
+    build_scheduler_service,
     build_test_generation_service,
     build_trace_service,
     build_worker_services,
@@ -12,6 +13,7 @@ from ooh.services.factory import (
 from ooh.services.jobs import JobService
 from ooh.services.learnings import LearningService
 from ooh.services.repositories import RepositoryIngestionResult, RepositoryService
+from ooh.services.scheduler import SchedulerService, SchedulerTickResult
 from ooh.services.test_generation import TestGenerationJobResult, TestGenerationService
 from ooh.services.traces import AgentRunSnapshot, TraceService
 
@@ -25,6 +27,8 @@ __all__ = [
     "NotFoundError",
     "RepositoryIngestionResult",
     "RepositoryService",
+    "SchedulerService",
+    "SchedulerTickResult",
     "ServiceError",
     "TestGenerationJobResult",
     "TestGenerationService",
@@ -33,6 +37,7 @@ __all__ = [
     "build_job_service",
     "build_learning_service",
     "build_repository_service",
+    "build_scheduler_service",
     "build_test_generation_service",
     "build_trace_service",
     "build_worker_services",

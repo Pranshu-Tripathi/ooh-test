@@ -10,9 +10,14 @@ class Settings(BaseSettings):
 
     env: str = "development"
     log_level: str = "INFO"
+    log_format: str = "json"
     api_host: str = "0.0.0.0"
     api_port: int = 8500
-    worker_poll_interval_seconds: int = Field(default=5, ge=1)
+    worker_poll_interval_seconds: float = Field(default=5, ge=0.1)
+    worker_lease_seconds: float = Field(default=3_600, ge=30)
+    worker_job_types: str | None = None
+    scheduler_poll_interval_seconds: float = Field(default=5, ge=0.1)
+    scheduler_batch_size: int = Field(default=100, ge=1, le=1_000)
     database_url: str = "postgresql://ooh:ooh@localhost:8501/ooh"
     cache_root: Path = Path("/ooh_cache")
     model_provider: str = "ollama"

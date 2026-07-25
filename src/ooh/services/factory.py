@@ -19,6 +19,7 @@ from ooh.db.repos import (
     JobRepo,
     RepoSnapshotRepo,
     RepositoryRepo,
+    RepositoryScheduleRepo,
     SavedLearningRepo,
     TestAnswerRepo,
     TestResultRepo,
@@ -27,6 +28,7 @@ from ooh.services.answer_judging import AnswerJudgingService
 from ooh.services.jobs import JobService
 from ooh.services.learnings import LearningService
 from ooh.services.repositories import RepositoryService
+from ooh.services.scheduler import SchedulerService
 from ooh.services.test_generation import TestGenerationService
 from ooh.services.traces import TraceService
 from ooh.worker.context_pack_builder import ContextPackBuilder
@@ -112,6 +114,7 @@ def build_test_generation_service(
         repository_repo=RepositoryRepo(db),
         repo_snapshot_repo=RepoSnapshotRepo(db),
         context_pack_repo=ContextPackRepo(db),
+        drift_event_repo=DriftEventRepo(db),
         generated_test_repo=GeneratedTestRepo(db),
         job_repo=JobRepo(db),
         generated_test_run_service=generated_test_run_service,
@@ -158,6 +161,14 @@ def build_learning_service(db: Database | None = None) -> LearningService:
     return LearningService(
         repository_repo=RepositoryRepo(db),
         saved_learning_repo=SavedLearningRepo(db),
+    )
+
+
+def build_scheduler_service(db: Database | None = None) -> SchedulerService:
+    db = db or get_database()
+    return SchedulerService(
+        repository_repo=RepositoryRepo(db),
+        repository_schedule_repo=RepositoryScheduleRepo(db),
     )
 
 
