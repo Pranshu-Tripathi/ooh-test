@@ -665,6 +665,20 @@ h3 {
   padding: 14px;
 }
 
+.schedule-form {
+  padding: 14px;
+}
+
+.checkbox-label {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.checkbox-label input {
+  height: 16px;
+  width: 16px;
+}
+
 .node-dot {
   background: currentColor;
   border-radius: 999px;

@@ -21,6 +21,7 @@ services:
     environment:
       OOH_ENV: ${OOH_ENV:-development}
       OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_LOG_FORMAT: ${OOH_LOG_FORMAT:-json}
       OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
     depends_on:
       postgres:
@@ -32,6 +33,7 @@ services:
     environment:
       OOH_ENV: ${OOH_ENV:-development}
       OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_LOG_FORMAT: ${OOH_LOG_FORMAT:-json}
       OOH_API_HOST: ${OOH_API_HOST:-0.0.0.0}
       OOH_API_PORT: ${OOH_API_PORT:-8500}
       OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
@@ -66,7 +68,10 @@ services:
     environment:
       OOH_ENV: ${OOH_ENV:-development}
       OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_LOG_FORMAT: ${OOH_LOG_FORMAT:-json}
       OOH_WORKER_POLL_INTERVAL_SECONDS: ${OOH_WORKER_POLL_INTERVAL_SECONDS:-5}
+      OOH_WORKER_LEASE_SECONDS: ${OOH_WORKER_LEASE_SECONDS:-3600}
+      OOH_WORKER_JOB_TYPES: ${OOH_WORKER_JOB_TYPES:-}
       OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
       OOH_CACHE_ROOT: ${OOH_CACHE_ROOT:-/ooh_cache}
       OOH_MODEL_PROVIDER: ${OOH_MODEL_PROVIDER:-ollama}
@@ -87,6 +92,27 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-m", "ooh.worker.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  scheduler:
+    build: .
+    command: ["python", "-m", "ooh.scheduler.main"]
+    environment:
+      OOH_ENV: ${OOH_ENV:-development}
+      OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_LOG_FORMAT: ${OOH_LOG_FORMAT:-json}
+      OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
+      OOH_SCHEDULER_POLL_INTERVAL_SECONDS: ${OOH_SCHEDULER_POLL_INTERVAL_SECONDS:-5}
+      OOH_SCHEDULER_BATCH_SIZE: ${OOH_SCHEDULER_BATCH_SIZE:-100}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "ooh.scheduler.healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 6

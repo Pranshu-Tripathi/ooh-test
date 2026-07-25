@@ -8,6 +8,7 @@ from ooh.db.models import ContextPackType, GeneratedTestRead, JobRead, JobType, 
 from ooh.db.repos import (
     ContextPackRepo,
     ContextPackWithSources,
+    DriftEventRepo,
     GeneratedTestRepo,
     JobRepo,
     RepoSnapshotRepo,
@@ -31,6 +32,7 @@ class TestGenerationService:
         repository_repo: RepositoryRepo,
         repo_snapshot_repo: RepoSnapshotRepo,
         context_pack_repo: ContextPackRepo,
+        drift_event_repo: DriftEventRepo,
         generated_test_repo: GeneratedTestRepo,
         job_repo: JobRepo,
         generated_test_run_service: GeneratedTestRunService | None = None,
@@ -39,6 +41,7 @@ class TestGenerationService:
         self.repository_repo = repository_repo
         self.repo_snapshot_repo = repo_snapshot_repo
         self.context_pack_repo = context_pack_repo
+        self.drift_event_repo = drift_event_repo
         self.generated_test_repo = generated_test_repo
         self.job_repo = job_repo
         self.generated_test_run_service = generated_test_run_service
@@ -78,13 +81,33 @@ class TestGenerationService:
             raise RuntimeError("generated test runner is not configured")
 
         repository = self._get_repository(job.repository_id)
-        snapshot = self.repo_snapshot_repo.latest_for_repository(job.repository_id)
-        if snapshot is None:
-            raise ValueError(f"repository has no snapshots: {job.repository_id}")
+        snapshot_id = payload_optional_uuid(job, "snapshot_id")
+        snapshot = (
+            self.repo_snapshot_repo.get(snapshot_id)
+            if snapshot_id is not None
+            else self.repo_snapshot_repo.latest_for_repository(job.repository_id)
+        )
+        if snapshot is None or snapshot.repository_id != job.repository_id:
+            raise ValueError(f"repository snapshot is unavailable: {snapshot_id}")
+
+        drift_event_id = payload_optional_uuid(job, "drift_event_id")
+        drift_event = (
+            self.drift_event_repo.get(drift_event_id)
+            if drift_event_id is not None
+            else None
+        )
+        if drift_event is not None and (
+            drift_event.repository_id != job.repository_id
+            or drift_event.snapshot_id != snapshot.id
+        ):
+            raise ValueError("drift event does not belong to the requested snapshot")
+        if drift_event_id is not None and drift_event is None:
+            raise ValueError(f"drift event is unavailable: {drift_event_id}")
 
         created_packs = self.repository_service.build_context_packs_for_snapshot(
             repository=repository,
             snapshot=snapshot,
+            drift_event=drift_event,
         )
         requested_pack_types = requested_pack_types_from_job(job)
         selected_packs = [
@@ -125,3 +148,12 @@ def requested_pack_types_from_job(job: JobRead) -> set[ContextPackType] | None:
             raise ValueError("generate_test payload pack_types must contain strings")
         pack_types.add(ContextPackType(raw_pack_type))
     return pack_types or None
+
+
+def payload_optional_uuid(job: JobRead, key: str) -> UUID | None:
+    raw_value = job.payload.get(key)
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, str):
+        raise ValueError(f"{job.job_type.value} payload {key} must be a string")
+    return UUID(raw_value)

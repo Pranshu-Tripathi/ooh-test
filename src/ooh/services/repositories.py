@@ -256,9 +256,10 @@ class RepositoryService:
         *,
         repository: RepositoryRead,
         snapshot: RepoSnapshotRead,
+        drift_event: DriftEventRead | None = None,
     ) -> list[ContextPackWithSources]:
         active_profile = self.attention_profile_repo.get_active_for_repository(repository.id)
-        drift_event = self.drift_event_repo.latest_for_repository(repository.id)
+        drift_event = drift_event or self.drift_event_repo.latest_for_repository(repository.id)
         guidance_sources = self.guidance_source_repo.list_enabled_for_repository(repository.id)
         built_packs = self.context_pack_builder.build(
             repository=repository,

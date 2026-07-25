@@ -30,6 +30,13 @@ class RepoSnapshotRepo:
             session.refresh(snapshot)
             return RepoSnapshotRead.model_validate(snapshot)
 
+    def get(self, snapshot_id: UUID) -> RepoSnapshotRead | None:
+        with self.db.session() as session:
+            snapshot = session.get(RepoSnapshot, snapshot_id)
+            if snapshot is None:
+                return None
+            return RepoSnapshotRead.model_validate(snapshot)
+
     def latest_for_repository(self, repository_id: UUID) -> RepoSnapshotRead | None:
         with self.db.session() as session:
             snapshot = session.scalar(

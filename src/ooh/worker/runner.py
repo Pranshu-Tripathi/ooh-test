@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
@@ -17,6 +18,8 @@ class JobRunner:
     def __init__(self, db: Database, *, worker_id: str) -> None:
         settings = get_settings()
         self.worker_id = worker_id
+        self.lease_duration = timedelta(seconds=settings.worker_lease_seconds)
+        self.job_types = self._configured_job_types(settings.worker_job_types)
         services = build_worker_services(db, settings=settings)
         self.job_service = services.jobs
         self.repository_service = services.repositories
@@ -24,7 +27,11 @@ class JobRunner:
         self.answer_judging_service = services.answer_judging
 
     def process_once(self) -> bool:
-        job = self.job_service.claim_next(worker_id=self.worker_id)
+        job = self.job_service.claim_next(
+            worker_id=self.worker_id,
+            lease_duration=self.lease_duration,
+            job_types=self.job_types,
+        )
         if job is None:
             return False
 
@@ -58,8 +65,10 @@ class JobRunner:
             )
             failed_job = self.job_service.mark_failed(
                 job.id,
-                error_summary=str(exc),
+                error_summary=self._public_error_summary(job, exc),
                 result_metadata=result_metadata,
+                expected_worker_id=self.worker_id,
+                expected_attempt_count=job.attempt_count,
             )
             if (
                 failed_job.status == JobStatus.FAILED
@@ -69,7 +78,12 @@ class JobRunner:
                 self.repository_service.mark_repository_failed(failed_job.repository_id)
             return True
 
-        self.job_service.mark_succeeded(job.id, result_metadata=result_metadata)
+        self.job_service.mark_succeeded(
+            job.id,
+            result_metadata=result_metadata,
+            expected_worker_id=self.worker_id,
+            expected_attempt_count=job.attempt_count,
+        )
         logger.info(
             "job succeeded job_id=%s job_type=%s repository_id=%s worker_id=%s result_metadata=%s",
             job.id,
@@ -187,8 +201,19 @@ class JobRunner:
             "max_attempts": job.max_attempts,
             "worker_id": self.worker_id,
             "error_type": type(exc).__name__,
-            "error_message": str(exc),
+            "public_error": self._public_error_summary(job, exc),
         }
+
+    @staticmethod
+    def _public_error_summary(job: JobRead, exc: Exception) -> str:
+        return f"{job.job_type.value} failed ({type(exc).__name__})"
+
+    @staticmethod
+    def _configured_job_types(raw_job_types: str | None) -> set[JobType] | None:
+        if raw_job_types is None or not raw_job_types.strip():
+            return None
+        values = [value.strip() for value in raw_job_types.split(",") if value.strip()]
+        return {JobType(value) for value in values}
 
     @staticmethod
     def _requested_pack_types(job: JobRead) -> set[ContextPackType] | None:

@@ -58,6 +58,7 @@ import type {
   JobDetail,
   ProvenanceRef,
   Repository,
+  RepositorySchedule,
   SavedLearning,
   TestAnswer,
   TestResult
@@ -1393,14 +1394,133 @@ function statusColor(status: string) {
 function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
   const repository = useAsyncData(() => api.getRepository(repositoryId), [repositoryId]);
   const profiles = useAsyncData(() => api.listAttentionProfiles(repositoryId), [repositoryId]);
+  const schedule = useAsyncData(() => api.getRepositorySchedule(repositoryId), [repositoryId]);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [minimumScore, setMinimumScore] = useState("25");
+  const [maximumScore, setMaximumScore] = useState("");
+  const [scheduledPackTypes, setScheduledPackTypes] = useState<string[]>([
+    "low_level_components"
+  ]);
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [savedSchedule, setSavedSchedule] = useState<RepositorySchedule | null>(null);
+
+  useEffect(() => {
+    if (!schedule.data) {
+      return;
+    }
+    setScheduleEnabled(schedule.data.enabled);
+    setMinimumScore(String(schedule.data.drift_min_score));
+    setMaximumScore(
+      schedule.data.drift_max_score === null ? "" : String(schedule.data.drift_max_score)
+    );
+    setScheduledPackTypes(schedule.data.pack_types);
+    setSavedSchedule(schedule.data);
+  }, [schedule.data]);
+
+  async function saveSchedule(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setScheduleBusy(true);
+    setScheduleError(null);
+    try {
+      const updated = await api.updateRepositorySchedule(repositoryId, {
+        enabled: scheduleEnabled,
+        drift_min_score: minimumScore,
+        drift_max_score: maximumScore.trim() ? maximumScore : null,
+        pack_types: scheduledPackTypes
+      });
+      setSavedSchedule(updated);
+      await schedule.reload();
+    } catch (exc) {
+      setScheduleError(errorMessage(exc));
+    } finally {
+      setScheduleBusy(false);
+    }
+  }
 
   return (
     <div className="page stack">
       <PageTitle
         icon={<Settings size={22} />}
         title={`${repository.data?.name ?? "Repository"} settings`}
-        eyebrow="Attention profiles"
+        eyebrow="Automation and attention"
       />
+      <section className="panel">
+        <PanelHeader title="Drift-triggered tests" icon={<Activity size={17} />} />
+        <form className="stack schedule-form" onSubmit={saveSchedule}>
+          <label className="row checkbox-label">
+            <input
+              checked={scheduleEnabled}
+              onChange={(event) => setScheduleEnabled(event.target.checked)}
+              type="checkbox"
+            />
+            <span>Generate tests when a new drift score enters this range</span>
+          </label>
+          <div className="two-column">
+            <label>
+              <span>Minimum score (inclusive)</span>
+              <input
+                min="0"
+                required
+                step="0.01"
+                type="number"
+                value={minimumScore}
+                onChange={(event) => setMinimumScore(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Maximum score (inclusive, optional)</span>
+              <input
+                min="0"
+                step="0.01"
+                type="number"
+                value={maximumScore}
+                onChange={(event) => setMaximumScore(event.target.value)}
+              />
+            </label>
+          </div>
+          <div>
+            <span className="muted">Test types</span>
+            <div className="segmented">
+              {PACK_TYPES.map((packType) => (
+                <button
+                  className={scheduledPackTypes.includes(packType) ? "active" : ""}
+                  key={packType}
+                  onClick={() =>
+                    setScheduledPackTypes((current) =>
+                      current.includes(packType)
+                        ? current.filter((value) => value !== packType)
+                        : [...current, packType]
+                    )
+                  }
+                  type="button"
+                >
+                  {labelize(packType)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="muted">
+            Only drift events created after this automation is enabled are evaluated. Baseline
+            ingestions never trigger a test.
+          </p>
+          {scheduleError ? <InlineError message={scheduleError} /> : null}
+          {savedSchedule ? (
+            <div className="notice">
+              <Clock3 size={15} />
+              Active since {formatDate(savedSchedule.active_since)}
+            </div>
+          ) : null}
+          <button
+            className="primary action-button"
+            disabled={scheduleBusy || scheduledPackTypes.length === 0}
+            type="submit"
+          >
+            <Settings size={15} />
+            Save automation
+          </button>
+        </form>
+      </section>
       <section className="panel">
         <PanelHeader title="Attention profiles" icon={<Layers size={17} />} />
         <AsyncBoundary state={profiles}>
@@ -1458,6 +1578,10 @@ function JobPage({ jobId }: { jobId: string }) {
                 <dd>{formatDate(job.data.run_after)}</dd>
                 <dt>Locked by</dt>
                 <dd>{job.data.locked_by ?? "-"}</dd>
+                <dt>Lease expires</dt>
+                <dd>{formatDate(job.data.lease_expires_at)}</dd>
+                <dt>Idempotency key</dt>
+                <dd>{job.data.idempotency_key ?? "-"}</dd>
                 <dt>Error</dt>
                 <dd>{job.data.error_summary ?? "-"}</dd>
               </dl>

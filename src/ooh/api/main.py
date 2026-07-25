@@ -14,6 +14,7 @@ from ooh.api.routes.tests import router as tests_router
 from ooh.api.routes.traces import router as traces_router
 from ooh.config import get_settings
 from ooh.db import check_database, check_schema_current
+from ooh.health import check_cache_writable
 from ooh.logging import configure_logging
 
 settings = get_settings()
@@ -26,6 +27,7 @@ FRONTEND_INDEX_PATH = FRONTEND_DIST_PATH / "index.html"
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     check_database()
     check_schema_current()
+    check_cache_writable(settings.cache_root)
     yield
 
 
@@ -57,6 +59,7 @@ def healthz() -> dict[str, str]:
 def readyz() -> dict[str, str]:
     check_database()
     check_schema_current()
+    check_cache_writable(settings.cache_root)
     return {"status": "ready", "service": "api"}
 
 
@@ -73,7 +76,7 @@ def runtime() -> dict[str, str]:
 
 
 def main() -> None:
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, log_format=settings.log_format)
     uvicorn.run("ooh.api.main:app", host=settings.api_host, port=settings.api_port)
 
 
