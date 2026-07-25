@@ -3,8 +3,11 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
+from ooh.api.schemas.repositories import GenerateTestJobRequest
 from ooh.db.models import AgentStatus, ContextPackType, JobRead, JobStatus, JobType
+from ooh.services.test_generation import requested_question_counts_from_job
 from ooh.worker.runner import JobRunner
 
 
@@ -15,6 +18,67 @@ def test_requested_pack_types_accepts_context_pack_values() -> None:
         ContextPackType.LOW_LEVEL_COMPONENTS,
         ContextPackType.ACTIVE_PR,
     }
+
+
+def test_requested_question_counts_accepts_generation_plan() -> None:
+    job = build_job(
+        {
+            "generation_plan": [
+                {"category": "low_level_components", "question_count": 3},
+                {"category": "active_pr", "question_count": 2},
+            ]
+        }
+    )
+
+    assert requested_question_counts_from_job(job) == {
+        ContextPackType.LOW_LEVEL_COMPONENTS: 3,
+        ContextPackType.ACTIVE_PR: 2,
+    }
+    assert JobRunner._requested_pack_types(job) == {
+        ContextPackType.LOW_LEVEL_COMPONENTS,
+        ContextPackType.ACTIVE_PR,
+    }
+
+
+def test_legacy_pack_types_use_the_configured_default_question_count() -> None:
+    job = build_job({"pack_types": ["low_level_components", "active_pr"]})
+
+    assert requested_question_counts_from_job(
+        job,
+        default_questions_per_category=3,
+    ) == {
+        ContextPackType.LOW_LEVEL_COMPONENTS: 3,
+        ContextPackType.ACTIVE_PR: 3,
+    }
+
+
+def test_generation_plan_request_enforces_category_and_job_limits() -> None:
+    request = GenerateTestJobRequest(
+        generation_plan=[
+            {"category": "low_level_components", "question_count": 5},
+            {"category": "active_pr", "question_count": 2},
+        ]
+    )
+
+    assert request.generation_plan is not None
+    assert [item.question_count for item in request.generation_plan] == [5, 2]
+
+    with pytest.raises(ValidationError, match="less than or equal to 5"):
+        GenerateTestJobRequest(
+            generation_plan=[
+                {"category": "low_level_components", "question_count": 6},
+            ]
+        )
+
+    with pytest.raises(ValidationError, match="more than 15"):
+        GenerateTestJobRequest(
+            generation_plan=[
+                {"category": "low_level_components", "question_count": 5},
+                {"category": "active_pr", "question_count": 5},
+                {"category": "high_level_design", "question_count": 5},
+                {"category": "design_decisions", "question_count": 1},
+            ]
+        )
 
 
 def test_requested_pack_types_returns_none_when_unset_or_empty() -> None:
@@ -41,7 +105,13 @@ def test_process_once_marks_succeeded_with_generation_result_metadata() -> None:
             run_generation_job=lambda _job: SimpleNamespace(
                 run_result=SimpleNamespace(
                     agent_run=SimpleNamespace(id=agent_run_id, status=AgentStatus.SUCCEEDED),
-                    generated_tests=[SimpleNamespace(id=generated_test_id)],
+                    generated_tests=[
+                        SimpleNamespace(
+                            id=generated_test_id,
+                            category=SimpleNamespace(value="low_level_components"),
+                            test_payload={"type": "mcq_single"},
+                        )
+                    ],
                 ),
                 selected_context_packs=[
                     SimpleNamespace(
@@ -61,8 +131,13 @@ def test_process_once_marks_succeeded_with_generation_result_metadata() -> None:
         "repository_id": str(job.repository_id),
         "agent_run_id": str(agent_run_id),
         "agent_run_status": "succeeded",
+        "requested_question_count": 1,
         "generated_test_count": 1,
+        "failed_question_count": 0,
+        "question_failures": [],
         "generated_test_ids": [str(generated_test_id)],
+        "generated_test_categories": ["low_level_components"],
+        "generated_test_formats": ["mcq_single"],
         "context_pack_ids": [str(context_pack_id)],
         "context_pack_types": ["low_level_components"],
     }
@@ -89,6 +164,62 @@ def test_process_once_marks_failed_with_failure_result_metadata() -> None:
         "worker_id": "test-worker",
         "error_type": "RuntimeError",
         "public_error": "generate_test failed (RuntimeError)",
+    }
+
+
+def test_process_once_records_all_question_failures_in_job_metadata() -> None:
+    job = build_job(
+        {
+            "generation_plan": [
+                {"category": "low_level_components", "question_count": 2}
+            ]
+        }
+    )
+    agent_run_id = uuid4()
+    context_pack_id = uuid4()
+    failure_payload = {
+        "category": "low_level_components",
+        "context_pack_id": str(context_pack_id),
+        "question_number": 1,
+        "question_count": 2,
+        "error_type": "RuntimeError",
+        "reason": "provider unavailable",
+        "attempt_count": 1,
+    }
+    failure = SimpleNamespace(to_dict=lambda: failure_payload)
+    generation_error = RuntimeError("provider unavailable")
+    generation_error.generation_run_result = SimpleNamespace(
+        agent_run=SimpleNamespace(id=agent_run_id, status=AgentStatus.FAILED),
+        requested_question_count=2,
+        generated_tests=[],
+        failures=[failure, failure],
+    )
+
+    def fail_generation(_job: JobRead) -> object:
+        raise generation_error
+
+    runner = build_runner(
+        job_service=FakeJobService(job),
+        test_generation_service=SimpleNamespace(run_generation_job=fail_generation),
+    )
+
+    assert runner.process_once() is True
+
+    assert runner.job_service.failed_metadata == {
+        "repository_id": str(job.repository_id),
+        "job_type": "generate_test",
+        "attempt_count": 1,
+        "max_attempts": 3,
+        "worker_id": "test-worker",
+        "error_type": "RuntimeError",
+        "public_error": "generate_test failed (RuntimeError)",
+        "agent_run_id": str(agent_run_id),
+        "agent_run_status": "failed",
+        "requested_question_count": 2,
+        "generated_test_count": 0,
+        "failed_question_count": 2,
+        "question_failures": [failure_payload, failure_payload],
+        "generated_test_ids": [],
     }
 
 

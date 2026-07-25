@@ -117,6 +117,7 @@ def build_test_generation_service(
         drift_event_repo=DriftEventRepo(db),
         generated_test_repo=GeneratedTestRepo(db),
         job_repo=JobRepo(db),
+        questions_per_category_default=settings.generation_questions_per_category,
         generated_test_run_service=generated_test_run_service,
     )
 
@@ -164,11 +165,17 @@ def build_learning_service(db: Database | None = None) -> LearningService:
     )
 
 
-def build_scheduler_service(db: Database | None = None) -> SchedulerService:
+def build_scheduler_service(
+    db: Database | None = None,
+    *,
+    settings: Settings | None = None,
+) -> SchedulerService:
     db = db or get_database()
+    settings = settings or get_settings()
     return SchedulerService(
         repository_repo=RepositoryRepo(db),
         repository_schedule_repo=RepositoryScheduleRepo(db),
+        questions_per_category_default=settings.generation_questions_per_category,
     )
 
 

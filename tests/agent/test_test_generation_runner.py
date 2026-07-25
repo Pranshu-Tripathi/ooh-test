@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from ooh.agent import AgentArtifactStore, GeneratedTestRunService
+from ooh.agent.test_generation_runner import find_duplicate_question
 from ooh.agent.providers import ModelRequest, ModelResponse, ModelToolCall
 from ooh.db.models import (
     AgentActivity,
@@ -87,6 +88,7 @@ class FakeGeneratedTestRepo:
     def __init__(self, *, fail_on_create: bool = False) -> None:
         self.inputs: list[GeneratedTestInput] = []
         self.fail_on_create = fail_on_create
+        self.existing_tests: list[GeneratedTestRead] = []
 
     def create_many(self, inputs: list[GeneratedTestInput]) -> list[GeneratedTestRead]:
         if self.fail_on_create:
@@ -108,6 +110,14 @@ class FakeGeneratedTestRepo:
             )
             for input in inputs
         ]
+
+    def list_for_repository(
+        self,
+        _repository_id: UUID,
+        *,
+        limit: int = 50,
+    ) -> list[GeneratedTestRead]:
+        return self.existing_tests[:limit]
 
 
 class FakeAgentTraceRepo:
@@ -310,6 +320,186 @@ def test_generated_test_run_service_persists_tests_and_trace_artifacts(tmp_path)
 
     assert len(provider.requests) == 1
     assert provider.requests[0].response_format == "json_object"
+
+
+def test_generated_test_run_service_generates_multiple_questions_for_one_pack(tmp_path) -> None:
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "What should the developer inspect first?",
+                    "expected_answer": "Inspect src/app.py.",
+                    "evidence_refs": [
+                        {"source_type": "code", "source_uri": "code:src/app.py"}
+                    ],
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "Why does the implementation rely on src/app.py?",
+                    "expected_answer": "It contains the relevant implementation.",
+                    "evidence_refs": [
+                        {"source_type": "code", "source_uri": "code:src/app.py"}
+                    ],
+                }
+            ),
+        ]
+    )
+    trace_repo = FakeAgentTraceRepo()
+    generated_test_repo = FakeGeneratedTestRepo()
+    service = GeneratedTestRunService(
+        provider=provider,
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=generated_test_repo,
+    )
+    context_pack = build_context_pack(tmp_path)
+
+    result = service.generate_for_context_packs(
+        [context_pack],
+        question_counts={ContextPackType.ACTIVE_PR: 2},
+    )
+
+    assert result.requested_question_count == 2
+    assert result.failed_question_count == 0
+    assert len(result.generated_tests) == 2
+    assert len(provider.requests) == 2
+    assert [request.metadata["question_number"] for request in provider.requests] == [1, 2]
+    assert [request.metadata["question_count"] for request in provider.requests] == [2, 2]
+    assert [request.metadata["excluded_question_count"] for request in provider.requests] == [0, 1]
+    validated_names = [
+        Path(artifact.artifact_uri).name
+        for artifact in trace_repo.artifacts
+        if artifact.artifact_type == AgentArtifactType.VALIDATED_OUTPUT
+    ]
+    assert validated_names == [
+        f"{context_pack.context_pack.id}-question-1-validated-output.json",
+        f"{context_pack.context_pack.id}-question-2-validated-output.json",
+    ]
+
+
+def test_generated_test_run_service_keeps_valid_sibling_after_question_failure(
+    tmp_path,
+) -> None:
+    invalid_payload = '{"type": "short_answer", "question": "Missing answer"}'
+    provider = FakeProvider(
+        [
+            invalid_payload,
+            invalid_payload,
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "What implementation detail matters?",
+                    "expected_answer": "src/app.py contains the relevant detail.",
+                    "evidence_refs": [
+                        {"source_type": "code", "source_uri": "code:src/app.py"}
+                    ],
+                }
+            ),
+        ]
+    )
+    trace_repo = FakeAgentTraceRepo()
+    service = GeneratedTestRunService(
+        provider=provider,
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=FakeGeneratedTestRepo(),
+    )
+
+    result = service.generate_for_context_packs(
+        [build_context_pack(tmp_path)],
+        question_counts={ContextPackType.ACTIVE_PR: 2},
+    )
+
+    assert result.agent_run.status == AgentStatus.SUCCEEDED
+    assert result.requested_question_count == 2
+    assert len(result.generated_tests) == 1
+    assert result.failed_question_count == 1
+    assert result.failures is not None
+    assert result.failures[0].question_number == 1
+    assert result.failures[0].attempt_count == 2
+    generation_step = next(
+        step
+        for step in trace_repo.steps.values()
+        if step.step_type == AgentStepType.GENERATE_QUESTIONS
+    )
+    assert generation_step.status == AgentStatus.SUCCEEDED
+    assert generation_step.output_summary["failed_question_count"] == 1
+    assert len(generation_step.warning_summary) == 1
+
+
+def test_generated_test_run_service_regenerates_only_a_duplicate_question(tmp_path) -> None:
+    first_question = {
+        "type": "short_answer",
+        "question": "What should the developer inspect first?",
+        "expected_answer": "Inspect src/app.py.",
+        "evidence_refs": [{"source_type": "code", "source_uri": "code:src/app.py"}],
+    }
+    provider = FakeProvider(
+        [
+            json.dumps(first_question),
+            json.dumps(first_question),
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "Why is src/app.py relevant to this change?",
+                    "expected_answer": "It contains the changed behavior.",
+                    "evidence_refs": [
+                        {"source_type": "code", "source_uri": "code:src/app.py"}
+                    ],
+                }
+            ),
+        ]
+    )
+    trace_repo = FakeAgentTraceRepo()
+    service = GeneratedTestRunService(
+        provider=provider,
+        model="qwen3-coder:8b",
+        artifact_store=AgentArtifactStore(cache_root=tmp_path),
+        agent_trace_repo=trace_repo,
+        generated_test_repo=FakeGeneratedTestRepo(),
+    )
+
+    result = service.generate_for_context_packs(
+        [build_context_pack(tmp_path)],
+        question_counts={ContextPackType.ACTIVE_PR: 2},
+    )
+
+    assert len(result.generated_tests) == 2
+    assert len(provider.requests) == 3
+    assert [request.metadata["question_number"] for request in provider.requests] == [1, 2, 2]
+    dedupe_steps = [
+        step
+        for step in trace_repo.steps.values()
+        if step.step_type == AgentStepType.DEDUPE_AND_BALANCE
+    ]
+    assert len(dedupe_steps) == 1
+    assert dedupe_steps[0].status == AgentStatus.FAILED
+    assert dedupe_steps[0].output_summary["regeneration_scheduled"] is True
+
+
+def test_find_duplicate_question_detects_exact_and_near_duplicates() -> None:
+    prior = ["Which component creates the repository context pack?"]
+
+    assert (
+        find_duplicate_question(
+            "Which component creates the repository context pack?",
+            prior,
+        )
+        == prior[0]
+    )
+    assert (
+        find_duplicate_question(
+            "Which component creates a repository context pack?",
+            prior,
+        )
+        == prior[0]
+    )
+    assert find_duplicate_question("Why are context packs persisted?", prior) is None
 
 
 def test_generated_test_run_service_inspects_context_pack_with_repo_tools(tmp_path: Path) -> None:

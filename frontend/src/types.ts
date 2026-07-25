@@ -20,6 +20,18 @@ export type AgentActivity =
   | "persisting"
   | "retrying";
 
+export type RuntimeConfig = {
+  env: string;
+  cache_root: string;
+  model_provider: string;
+  ollama_base_url: string;
+  test_generator_model: string;
+  answer_judge_model: string;
+  generation_questions_per_category: number;
+  generation_max_questions_per_category: number;
+  generation_max_questions_per_job: number;
+};
+
 export type Repository = {
   id: string;
   name: string;

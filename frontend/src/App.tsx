@@ -327,9 +327,20 @@ function RepositoryWorkbench({
   const runs = useAsyncData(() => api.listAgentRuns(repositoryId), [repositoryId]);
   const results = useAsyncData(() => api.listRepositoryResults(repositoryId), [repositoryId]);
   const learnings = useAsyncData(() => api.listLearnings(repositoryId), [repositoryId]);
+  const runtime = useAsyncData(api.getRuntime, []);
   const [actionJob, setActionJob] = useState<Job | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [selectedPackTypes, setSelectedPackTypes] = useState<string[]>(["low_level_components"]);
+  const [questionCounts, setQuestionCounts] = useState<Record<string, number>>({});
+  const defaultQuestionCount = runtime.data?.generation_questions_per_category ?? 1;
+  const maxQuestionsPerCategory =
+    runtime.data?.generation_max_questions_per_category ?? defaultQuestionCount;
+  const maxQuestionsPerJob =
+    runtime.data?.generation_max_questions_per_job ?? maxQuestionsPerCategory;
+  const requestedQuestionCount = selectedPackTypes.reduce(
+    (total, packType) => total + (questionCounts[packType] ?? defaultQuestionCount),
+    0
+  );
 
   const reloadAll = useCallback(() => {
     void repository.reload();
@@ -395,7 +406,23 @@ function RepositoryWorkbench({
         </button>
         <button
           className="primary"
-          onClick={() => void runAction(() => api.enqueueGenerateTest(repositoryId, selectedPackTypes))}
+          disabled={
+            runtime.loading ||
+            runtime.error !== null ||
+            selectedPackTypes.length === 0 ||
+            requestedQuestionCount > maxQuestionsPerJob
+          }
+          onClick={() =>
+            void runAction(() =>
+              api.enqueueGenerateTest(
+                repositoryId,
+                selectedPackTypes.map((category) => ({
+                  category,
+                  question_count: questionCounts[category] ?? defaultQuestionCount
+                }))
+              )
+            )
+          }
         >
           <Play size={15} />
           Generate
@@ -417,7 +444,39 @@ function RepositoryWorkbench({
             </button>
           ))}
         </div>
+        <div className="generation-counts">
+          {selectedPackTypes.map((packType) => (
+            <label key={packType}>
+              <span>{labelize(packType)} questions</span>
+              <input
+                max={maxQuestionsPerCategory}
+                min="1"
+                onChange={(event) =>
+                  setQuestionCounts((current) => ({
+                    ...current,
+                    [packType]: Math.min(
+                      maxQuestionsPerCategory,
+                      Math.max(1, Number(event.target.value) || defaultQuestionCount)
+                    )
+                  }))
+                }
+                type="number"
+                value={questionCounts[packType] ?? defaultQuestionCount}
+              />
+            </label>
+          ))}
+          <span
+            className={
+              requestedQuestionCount > maxQuestionsPerJob ? "generation-count-error" : "muted"
+            }
+          >
+            {requestedQuestionCount}/{maxQuestionsPerJob} questions
+          </span>
+        </div>
       </div>
+      {runtime.error ? (
+        <InlineError message={`Generation configuration unavailable: ${runtime.error}`} />
+      ) : null}
       {actionError ? <InlineError message={actionError} /> : null}
       {actionJob ? (
         <div className="notice">

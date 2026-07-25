@@ -63,11 +63,13 @@ def test_scheduler_tick_reports_evaluated_and_triggered_counts() -> None:
     service = SchedulerService(
         repository_repo=FakeRepositoryRepo(),
         repository_schedule_repo=schedule_repo,
+        questions_per_category_default=3,
     )
 
     result = service.tick(batch_size=25)
 
     assert schedule_repo.batch_size == 25
+    assert schedule_repo.questions_per_category == 3
     assert result.evaluated_count == 3
     assert result.triggered_count == 2
 
@@ -93,7 +95,14 @@ class FakeScheduleRepo:
     def __init__(self) -> None:
         self.evaluations: list[object] = []
         self.batch_size: int | None = None
+        self.questions_per_category: int | None = None
 
-    def evaluate_pending(self, *, limit: int) -> list[object]:
+    def evaluate_pending(
+        self,
+        *,
+        limit: int,
+        questions_per_category: int,
+    ) -> list[object]:
         self.batch_size = limit
+        self.questions_per_category = questions_per_category
         return self.evaluations

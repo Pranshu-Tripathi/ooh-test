@@ -109,14 +109,31 @@ List context packs:
 curl http://localhost:8500/repositories/{repository_id}/context-packs
 ```
 
-Generate repository-specific tests from the latest snapshot. During smoke testing, request a
-single pack type so the local model does one focused generation first:
+Generate repository-specific tests from the latest snapshot. A generation plan can request 1–5
+questions per category, up to 15 questions in one job. Each planned question uses an independent
+model call and validation/evidence loop:
 
 ```bash
 curl -X POST http://localhost:8500/repositories/{repository_id}/generate-test-jobs \
   -H "content-type: application/json" \
-  -d '{"pack_types":["low_level_components"]}'
+  -d '{
+    "generation_plan": [
+      {"category": "low_level_components", "question_count": 3},
+      {"category": "design_decisions", "question_count": 2}
+    ]
+  }'
 ```
+
+Generation is sequential to keep local-model load bounded. A job succeeds when at least one planned
+question is valid; its result metadata records requested, generated, and failed counts plus
+per-question failure details. Legacy `pack_types` requests remain supported and use the configured
+default for each selected category.
+
+Set `OOH_GENERATION_QUESTIONS_PER_CATEGORY` to control the default question count used by manual
+generation, legacy requests, and drift-triggered scheduler jobs. The API exposes this runtime value
+to the frontend, so all processes use the same default. Explicit `generation_plan` counts still
+override it. Its accepted range is 1–3 so the default remains safe when all five categories are
+selected. Explicit plans retain per-category and per-job safety limits of 5 and 15 respectively.
 
 After the job succeeds, list generated tests:
 

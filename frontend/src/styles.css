@@ -460,6 +460,36 @@ h3 {
   color: #74460b;
 }
 
+.generation-counts {
+  display: flex;
+  flex-basis: 100%;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.generation-counts label {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+}
+
+.generation-counts input {
+  height: 30px;
+  padding: 0 6px;
+  width: 58px;
+}
+
+.generation-counts > span {
+  align-self: center;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.generation-count-error {
+  color: var(--red);
+}
+
 .tabs {
   border-bottom: 1px solid var(--line);
   gap: 16px;

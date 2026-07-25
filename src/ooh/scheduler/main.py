@@ -15,7 +15,7 @@ class SchedulerProcess:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.stop_event = Event()
-        self.scheduler_service = build_scheduler_service()
+        self.scheduler_service = build_scheduler_service(settings=self.settings)
 
     def request_stop(self, signum: int, _frame: object) -> None:
         logger.info("scheduler stop requested", extra={"signal": signum})
@@ -28,9 +28,11 @@ class SchedulerProcess:
         check_database()
         check_schema_current()
         logger.info(
-            "scheduler started poll_interval_seconds=%s batch_size=%s once=%s",
+            "scheduler started poll_interval_seconds=%s batch_size=%s "
+            "questions_per_category=%s once=%s",
             self.settings.scheduler_poll_interval_seconds,
             self.settings.scheduler_batch_size,
+            self.settings.generation_questions_per_category,
             once,
         )
 
