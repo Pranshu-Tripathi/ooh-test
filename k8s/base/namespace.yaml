@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ooh-test
+  labels:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/part-of: ooh-test
+    app.kubernetes.io/managed-by: kustomize
+    ooh-test.dev/runtime: docker-desktop
