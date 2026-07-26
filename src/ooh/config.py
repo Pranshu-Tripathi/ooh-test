@@ -4,6 +4,11 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ooh.generation_config import (
+    DEFAULT_GENERATION_QUESTIONS_PER_CATEGORY,
+    MAX_DEFAULT_GENERATION_QUESTIONS_PER_CATEGORY,
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OOH_", env_file=".env", extra="ignore")
@@ -25,6 +30,11 @@ class Settings(BaseSettings):
     model_timeout_seconds: float = Field(default=300, gt=0)
     test_generator_model: str = "qwen3:8b"
     answer_judge_model: str = "deepseek-r1:8b"
+    generation_questions_per_category: int = Field(
+        default=DEFAULT_GENERATION_QUESTIONS_PER_CATEGORY,
+        ge=1,
+        le=MAX_DEFAULT_GENERATION_QUESTIONS_PER_CATEGORY,
+    )
     generation_prompt_max_bytes: int = Field(default=8_000, ge=4_000)
     tool_observation_max_bytes: int = Field(default=2_500, ge=500)
     agent_loop_timeout_seconds: float = Field(default=600, gt=0)

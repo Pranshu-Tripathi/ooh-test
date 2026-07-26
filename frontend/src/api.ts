@@ -13,8 +13,10 @@ import type {
   ProvenanceRef,
   Repository,
   RepositorySchedule,
+  RuntimeConfig,
   SavedLearning,
   TestAnswer,
+  TestAnswerPayload,
   TestResult
 } from "./types";
 
@@ -50,6 +52,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 }
 
 export const api = {
+  getRuntime: () => request<RuntimeConfig>("/runtime"),
   listRepositories: () => request<Repository[]>("/repositories"),
   getRepository: (repositoryId: string) => request<Repository>(`/repositories/${repositoryId}`),
   registerRepository: (payload: {
@@ -64,10 +67,13 @@ export const api = {
     }),
   enqueueIngest: (repositoryId: string) =>
     request<Job>(`/repositories/${repositoryId}/ingest-jobs`, { method: "POST" }),
-  enqueueGenerateTest: (repositoryId: string, packTypes?: string[]) =>
+  enqueueGenerateTest: (
+    repositoryId: string,
+    generationPlan?: Array<{ category: string; question_count: number }>
+  ) =>
     request<Job>(`/repositories/${repositoryId}/generate-test-jobs`, {
       method: "POST",
-      body: packTypes?.length ? { pack_types: packTypes } : {}
+      body: generationPlan?.length ? { generation_plan: generationPlan } : {}
     }),
   buildContextPacks: (repositoryId: string) =>
     request<ContextPack[]>(`/repositories/${repositoryId}/context-packs`, { method: "POST" }),
@@ -126,9 +132,9 @@ export const api = {
     request<TestAnswer[]>(`/generated-tests/${generatedTestId}/answers`),
   listResults: (generatedTestId: string) =>
     request<TestResult[]>(`/generated-tests/${generatedTestId}/results`),
-  submitAnswer: (generatedTestId: string, answerText: string) =>
+  submitAnswer: (generatedTestId: string, answerPayload: TestAnswerPayload) =>
     request<{ answer: TestAnswer; judge_job: Job }>(`/generated-tests/${generatedTestId}/answers`, {
       method: "POST",
-      body: { answer_text: answerText }
+      body: answerPayload
     })
 };

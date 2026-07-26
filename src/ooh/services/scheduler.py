@@ -4,6 +4,7 @@ from uuid import UUID
 
 from ooh.db.models import ContextPackType, RepositoryScheduleRead
 from ooh.db.repos import RepositoryRepo, RepositoryScheduleRepo
+from ooh.generation_config import validate_default_generation_questions_per_category
 from ooh.services.exceptions import NotFoundError
 
 
@@ -19,9 +20,15 @@ class SchedulerService:
         *,
         repository_repo: RepositoryRepo,
         repository_schedule_repo: RepositoryScheduleRepo,
+        questions_per_category_default: int,
     ) -> None:
         self.repository_repo = repository_repo
         self.repository_schedule_repo = repository_schedule_repo
+        self.questions_per_category_default = (
+            validate_default_generation_questions_per_category(
+                questions_per_category_default
+            )
+        )
 
     def get_repository_schedule(self, repository_id: UUID) -> RepositoryScheduleRead | None:
         self._ensure_repository_exists(repository_id)
@@ -52,7 +59,10 @@ class SchedulerService:
         )
 
     def tick(self, *, batch_size: int) -> SchedulerTickResult:
-        evaluations = self.repository_schedule_repo.evaluate_pending(limit=batch_size)
+        evaluations = self.repository_schedule_repo.evaluate_pending(
+            limit=batch_size,
+            questions_per_category=self.questions_per_category_default,
+        )
         return SchedulerTickResult(
             evaluated_count=len(evaluations),
             triggered_count=sum(1 for evaluation in evaluations if evaluation.matched),

@@ -132,7 +132,11 @@ class GeneratedTestAgentLoop:
         *,
         deadline: LoopDeadline | None = None,
         trace_branch: TraceBranch | None = None,
+        question_number: int = 1,
+        question_count: int = 1,
+        excluded_questions: list[str] | None = None,
     ) -> GeneratedTestLoopResult:
+        excluded_questions = excluded_questions or []
         turns: list[GeneratedTestLoopTurn] = []
         test_type = select_generated_test_type(context_pack)
         request = build_test_generation_request(
@@ -141,6 +145,9 @@ class GeneratedTestAgentLoop:
             test_type=test_type,
             max_prompt_bytes=self.max_prompt_bytes,
             max_tool_observation_bytes=self.max_tool_observation_bytes,
+            question_number=question_number,
+            question_count=question_count,
+            excluded_questions=excluded_questions,
         )
         action = "generate"
         sequence = 0
@@ -175,7 +182,11 @@ class GeneratedTestAgentLoop:
                         activity=AgentActivity.WAITING_ON_MODEL,
                         action=action,
                         parent_step_id=next_parent_step_id,
-                        input_summary={"phase": "test_generation"},
+                        input_summary={
+                            "phase": "test_generation",
+                            "question_number": question_number,
+                            "question_count": question_count,
+                        },
                     )
                     if trace_branch is not None
                     else None
@@ -242,6 +253,9 @@ class GeneratedTestAgentLoop:
                     test_type=test_type,
                     max_prompt_bytes=self.max_prompt_bytes,
                     max_tool_observation_bytes=self.max_tool_observation_bytes,
+                    question_number=question_number,
+                    question_count=question_count,
+                    excluded_questions=excluded_questions,
                 )
                 action = "repair"
                 if validation_trace is not None:
@@ -322,6 +336,9 @@ class GeneratedTestAgentLoop:
                     test_type=test_type,
                     max_prompt_bytes=self.max_prompt_bytes,
                     max_tool_observation_bytes=self.max_tool_observation_bytes,
+                    question_number=question_number,
+                    question_count=question_count,
+                    excluded_questions=excluded_questions,
                 )
                 action = "regenerate_evidence"
                 if evidence_trace is not None:
@@ -443,7 +460,11 @@ def build_test_generation_request(
     test_type: GeneratedTestType | None = None,
     max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
     max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    question_number: int = 1,
+    question_count: int = 1,
+    excluded_questions: list[str] | None = None,
 ) -> ModelRequest:
+    excluded_questions = excluded_questions or []
     requested_test_type = test_type or select_generated_test_type(context_pack)
     tool_inspection_hint = (
         "Use tool_inspection results when present; prefer evidence from tool calls for "
@@ -459,8 +480,10 @@ def build_test_generation_request(
         f"{test_type_instructions(requested_test_type)}"
     )
     user_prefix = (
-        "Generate one high-signal test from this context pack. "
+        f"Generate question {question_number} of {question_count} as one high-signal test "
+        "from this context pack. "
         "Prefer questions that require understanding repository-specific evidence.\n\n"
+        f"{_diversity_prompt(excluded_questions)}"
         "Context pack:\n"
     )
     user_content, context_view = _user_message_with_context(
@@ -493,6 +516,9 @@ def build_test_generation_request(
             "prompt_version": TEST_GENERATION_PROMPT_VERSION,
             "test_type": requested_test_type,
             "call_action": "generate",
+            "question_number": question_number,
+            "question_count": question_count,
+            "excluded_question_count": len(excluded_questions),
         },
     )
 
@@ -506,7 +532,11 @@ def build_test_generation_repair_request(
     test_type: GeneratedTestType | None = None,
     max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
     max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    question_number: int = 1,
+    question_count: int = 1,
+    excluded_questions: list[str] | None = None,
 ) -> ModelRequest:
+    excluded_questions = excluded_questions or []
     requested_test_type = test_type or select_generated_test_type(context_pack)
     system_content = (
         "You repair generated repository-understanding test JSON. "
@@ -519,6 +549,7 @@ def build_test_generation_repair_request(
         "and context pack below.\n\n"
         f"Validation error excerpt:\n{truncate_text_bytes(validation_error, 1_000)}\n\n"
         f"Invalid output excerpt:\n{truncate_text_bytes(invalid_output, 1_500)}\n\n"
+        f"{_diversity_prompt(excluded_questions)}"
         "Context pack:\n"
     )
     user_content, context_view = _user_message_with_context(
@@ -552,6 +583,9 @@ def build_test_generation_repair_request(
             "test_type": requested_test_type,
             "call_action": "repair",
             "repair": True,
+            "question_number": question_number,
+            "question_count": question_count,
+            "excluded_question_count": len(excluded_questions),
         },
     )
 
@@ -565,7 +599,11 @@ def build_test_generation_evidence_feedback_request(
     test_type: GeneratedTestType | None = None,
     max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
     max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    question_number: int = 1,
+    question_count: int = 1,
+    excluded_questions: list[str] | None = None,
 ) -> ModelRequest:
+    excluded_questions = excluded_questions or []
     requested_test_type = test_type or select_generated_test_type(context_pack)
     system_content = (
         "You regenerate repository-understanding test JSON when evidence refs are missing "
@@ -587,6 +625,7 @@ def build_test_generation_evidence_feedback_request(
         "Regenerate a grounded test. Keep the question only if it can cite visible evidence.\n\n"
         f"Evidence verification excerpt:\n{evidence_excerpt}\n\n"
         f"Previous payload excerpt:\n{payload_excerpt}\n\n"
+        f"{_diversity_prompt(excluded_questions)}"
         "Context pack:\n"
     )
     user_content, context_view = _user_message_with_context(
@@ -620,7 +659,28 @@ def build_test_generation_evidence_feedback_request(
             "test_type": requested_test_type,
             "call_action": "regenerate_evidence",
             "evidence_feedback": True,
+            "question_number": question_number,
+            "question_count": question_count,
+            "excluded_question_count": len(excluded_questions),
         },
+    )
+
+
+def _diversity_prompt(excluded_questions: list[str]) -> str:
+    if not excluded_questions:
+        return ""
+
+    unique_questions = list(dict.fromkeys(question.strip() for question in excluded_questions))
+    bounded_questions = [
+        truncate_text_bytes(question, 300)
+        for question in unique_questions[:12]
+        if question
+    ]
+    if not bounded_questions:
+        return ""
+    return (
+        "Create a materially different question from these recent or already planned questions:\n"
+        f"{json.dumps(bounded_questions, ensure_ascii=False)}\n\n"
     )
 
 

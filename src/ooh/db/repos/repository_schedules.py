@@ -89,7 +89,12 @@ class RepositoryScheduleRepo:
             )
             return RepositoryScheduleRead.model_validate(schedule)
 
-    def evaluate_pending(self, *, limit: int) -> list[DriftTriggerEvaluationRead]:
+    def evaluate_pending(
+        self,
+        *,
+        limit: int,
+        questions_per_category: int,
+    ) -> list[DriftTriggerEvaluationRead]:
         if limit < 1:
             raise ValueError("scheduler batch limit must be positive")
 
@@ -136,7 +141,13 @@ class RepositoryScheduleRepo:
                             "repository_id": str(schedule.repository_id),
                             "snapshot_id": str(drift_event.snapshot_id),
                             "drift_event_id": str(drift_event.id),
-                            "pack_types": schedule.pack_types,
+                            "generation_plan": [
+                                {
+                                    "category": pack_type,
+                                    "question_count": questions_per_category,
+                                }
+                                for pack_type in schedule.pack_types
+                            ],
                             "trigger": {
                                 "type": "drift_score_range",
                                 "repository_schedule_id": str(schedule.id),

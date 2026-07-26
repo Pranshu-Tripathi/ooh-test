@@ -86,6 +86,117 @@ GeneratedTestPayload = Annotated[
 GeneratedTestType = Literal["short_answer", "mcq_single", "mcq_multi"]
 
 
+class PublicEvidenceRef(StrictPayloadModel):
+    source_type: str = Field(min_length=1, max_length=100)
+    source_uri: str = Field(min_length=1, max_length=2000)
+    content_hash: str | None = Field(default=None, max_length=200)
+    context_pack_id: str | None = Field(default=None, max_length=100)
+
+
+class BaseGeneratedTestPublicPayload(StrictPayloadModel):
+    schema_version: int = Field(ge=1)
+    question: str = Field(min_length=1, max_length=4000)
+    evidence_refs: list[PublicEvidenceRef] = Field(default_factory=list, max_length=100)
+
+
+class ShortAnswerPublicPayload(BaseGeneratedTestPublicPayload):
+    type: Literal["short_answer"]
+
+
+class McqSinglePublicPayload(BaseGeneratedTestPublicPayload):
+    type: Literal["mcq_single"]
+    options: list[McqOption] = Field(min_length=2, max_length=10)
+
+
+class McqMultiPublicPayload(BaseGeneratedTestPublicPayload):
+    type: Literal["mcq_multi"]
+    options: list[McqOption] = Field(min_length=2, max_length=12)
+
+
+GeneratedTestPublicPayload = Annotated[
+    ShortAnswerPublicPayload | McqSinglePublicPayload | McqMultiPublicPayload,
+    Field(discriminator="type"),
+]
+
+
+class BaseGeneratedTestGradingPayload(StrictPayloadModel):
+    type: GeneratedTestType
+    rubric: list[RubricCriterion] = Field(default_factory=list, max_length=20)
+    explanation: str | None = Field(default=None, max_length=4000)
+
+
+class ShortAnswerGradingPayload(BaseGeneratedTestGradingPayload):
+    type: Literal["short_answer"]
+    expected_answer: str = Field(min_length=1, max_length=8000)
+
+
+class McqSingleGradingPayload(BaseGeneratedTestGradingPayload):
+    type: Literal["mcq_single"]
+    correct_option_ids: list[str] = Field(min_length=1, max_length=1)
+
+
+class McqMultiGradingPayload(BaseGeneratedTestGradingPayload):
+    type: Literal["mcq_multi"]
+    correct_option_ids: list[str] = Field(min_length=1, max_length=12)
+
+
+GeneratedTestGradingPayload = Annotated[
+    ShortAnswerGradingPayload | McqSingleGradingPayload | McqMultiGradingPayload,
+    Field(discriminator="type"),
+]
+
+
+class BaseSubmittedAnswerPayload(StrictPayloadModel):
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ShortAnswerSubmissionPayload(BaseSubmittedAnswerPayload):
+    type: Literal["short_answer"]
+    response_text: str = Field(min_length=1, max_length=8000)
+
+    @field_validator("response_text")
+    @classmethod
+    def response_text_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("response_text must not be blank")
+        return stripped
+
+
+class McqSingleSubmissionPayload(BaseSubmittedAnswerPayload):
+    type: Literal["mcq_single"]
+    selected_option_id: str = Field(min_length=1, max_length=20)
+
+    @field_validator("selected_option_id")
+    @classmethod
+    def selected_option_id_must_not_be_blank(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("selected_option_id must not be blank")
+        return stripped
+
+
+class McqMultiSubmissionPayload(BaseSubmittedAnswerPayload):
+    type: Literal["mcq_multi"]
+    selected_option_ids: list[str] = Field(min_length=1, max_length=12)
+
+    @field_validator("selected_option_ids")
+    @classmethod
+    def selected_option_ids_must_be_unique(cls, value: list[str]) -> list[str]:
+        stripped = [option_id.strip() for option_id in value]
+        if any(not option_id for option_id in stripped):
+            raise ValueError("selected_option_ids must not contain blank values")
+        if len(stripped) != len(set(stripped)):
+            raise ValueError("selected_option_ids must be unique")
+        return stripped
+
+
+SubmittedAnswerPayload = Annotated[
+    ShortAnswerSubmissionPayload | McqSingleSubmissionPayload | McqMultiSubmissionPayload,
+    Field(discriminator="type"),
+]
+
+
 class _WireMcqOption(StrictPayloadModel):
     id: str
     text: str
@@ -114,6 +225,9 @@ class _McqMultiWirePayload(_BaseGeneratedTestWirePayload):
     correct_option_ids: list[str]
 
 _generated_test_payload_adapter = TypeAdapter(GeneratedTestPayload)
+_generated_test_public_payload_adapter = TypeAdapter(GeneratedTestPublicPayload)
+_generated_test_grading_payload_adapter = TypeAdapter(GeneratedTestGradingPayload)
+_submitted_answer_payload_adapter = TypeAdapter(SubmittedAnswerPayload)
 _generated_test_payload_adapters: dict[GeneratedTestType, TypeAdapter[Any]] = {
     "short_answer": TypeAdapter(ShortAnswerTestPayload),
     "mcq_single": TypeAdapter(McqSingleTestPayload),
@@ -179,6 +293,81 @@ def normalize_generated_test_payload(
         expected_type=expected_type,
     )
     return validated_payload.model_dump(mode="json", exclude_none=True)
+
+
+def generated_test_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the browser-safe presentation view of a canonical generated test."""
+
+    generated_test = validate_generated_test_payload(payload)
+    public_payload: dict[str, Any] = {
+        "schema_version": generated_test.schema_version,
+        "type": generated_test.type,
+        "question": generated_test.question,
+        "evidence_refs": [
+            evidence_ref.model_dump(mode="json", exclude={"metadata"}, exclude_none=True)
+            for evidence_ref in generated_test.evidence_refs
+        ],
+    }
+    if isinstance(generated_test, McqSingleTestPayload | McqMultiTestPayload):
+        public_payload["options"] = [
+            option.model_dump(mode="json") for option in generated_test.options
+        ]
+    validated_payload = _generated_test_public_payload_adapter.validate_python(public_payload)
+    return validated_payload.model_dump(mode="json", exclude_none=True)
+
+
+def generated_test_grading_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return grading-only fields for judging and post-submission disclosure."""
+
+    generated_test = validate_generated_test_payload(payload)
+    grading_payload: dict[str, Any] = {
+        "type": generated_test.type,
+        "rubric": [
+            criterion.model_dump(mode="json") for criterion in generated_test.rubric
+        ],
+        "explanation": generated_test.explanation,
+    }
+    if isinstance(generated_test, ShortAnswerTestPayload):
+        grading_payload["expected_answer"] = generated_test.expected_answer
+    else:
+        grading_payload["correct_option_ids"] = generated_test.correct_option_ids
+    validated_payload = _generated_test_grading_payload_adapter.validate_python(grading_payload)
+    return validated_payload.model_dump(mode="json", exclude_none=True)
+
+
+def normalize_submitted_answer_payload(
+    payload: dict[str, Any],
+    *,
+    generated_test_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate an answer against the generated test's type and visible options."""
+
+    generated_test = validate_generated_test_payload(generated_test_payload)
+    submitted_answer = _submitted_answer_payload_adapter.validate_python(payload)
+    if submitted_answer.type != generated_test.type:
+        raise ValueError(
+            f"answer type {submitted_answer.type!r} does not match "
+            f"generated test type {generated_test.type!r}"
+        )
+
+    if isinstance(
+        submitted_answer,
+        McqSingleSubmissionPayload | McqMultiSubmissionPayload,
+    ):
+        valid_option_ids = {option.id for option in generated_test.options}
+        selected_option_ids = (
+            [submitted_answer.selected_option_id]
+            if isinstance(submitted_answer, McqSingleSubmissionPayload)
+            else submitted_answer.selected_option_ids
+        )
+        invalid_option_ids = sorted(set(selected_option_ids) - valid_option_ids)
+        if invalid_option_ids:
+            raise ValueError(
+                "selected option ids are not present in options: "
+                + ", ".join(invalid_option_ids)
+            )
+
+    return submitted_answer.model_dump(mode="json")
 
 
 def coerce_generated_test_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -145,12 +145,36 @@ class JobRunner:
         )
         generation_result = self.test_generation_service.run_generation_job(job)
         run_result = generation_result.run_result
+        failures = getattr(run_result, "failures", None) or []
+        generated_test_categories = [
+            generated_test.category.value
+            for generated_test in run_result.generated_tests
+            if getattr(generated_test, "category", None) is not None
+        ]
+        generated_test_formats = [
+            generated_test.test_payload.get("type")
+            for generated_test in run_result.generated_tests
+            if isinstance(getattr(generated_test, "test_payload", None), dict)
+            and isinstance(generated_test.test_payload.get("type"), str)
+        ]
         result_metadata: JobResultMetadata = {
             "repository_id": str(job.repository_id) if job.repository_id is not None else None,
             "agent_run_id": str(run_result.agent_run.id),
             "agent_run_status": run_result.agent_run.status.value,
+            "requested_question_count": getattr(
+                run_result,
+                "requested_question_count",
+                len(run_result.generated_tests) + len(failures),
+            ),
             "generated_test_count": len(run_result.generated_tests),
+            "failed_question_count": len(failures),
+            "question_failures": [
+                failure.to_dict() if hasattr(failure, "to_dict") else failure
+                for failure in failures
+            ],
             "generated_test_ids": [str(generated_test.id) for generated_test in run_result.generated_tests],
+            "generated_test_categories": generated_test_categories,
+            "generated_test_formats": generated_test_formats,
             "context_pack_ids": [
                 str(context_pack.context_pack.id)
                 for context_pack in generation_result.selected_context_packs
@@ -194,7 +218,7 @@ class JobRunner:
         return result_metadata
 
     def _failure_metadata(self, job: JobRead, exc: Exception) -> JobResultMetadata:
-        return {
+        result_metadata: JobResultMetadata = {
             "repository_id": str(job.repository_id) if job.repository_id is not None else None,
             "job_type": job.job_type.value,
             "attempt_count": job.attempt_count,
@@ -203,6 +227,26 @@ class JobRunner:
             "error_type": type(exc).__name__,
             "public_error": self._public_error_summary(job, exc),
         }
+        generation_run_result = getattr(exc, "generation_run_result", None)
+        if generation_run_result is not None:
+            failures = generation_run_result.failures or []
+            result_metadata.update(
+                {
+                    "agent_run_id": str(generation_run_result.agent_run.id),
+                    "agent_run_status": generation_run_result.agent_run.status.value,
+                    "requested_question_count": (
+                        generation_run_result.requested_question_count
+                    ),
+                    "generated_test_count": len(generation_run_result.generated_tests),
+                    "failed_question_count": len(failures),
+                    "question_failures": [failure.to_dict() for failure in failures],
+                    "generated_test_ids": [
+                        str(generated_test.id)
+                        for generated_test in generation_run_result.generated_tests
+                    ],
+                }
+            )
+        return result_metadata
 
     @staticmethod
     def _public_error_summary(job: JobRead, exc: Exception) -> str:

@@ -87,6 +87,14 @@ def enqueue_generate_test_job(
         generate_job = test_generation_service.enqueue_generate_test_job(
             repository_id,
             pack_types=request.pack_types,
+            question_counts=(
+                {
+                    item.category: item.question_count
+                    for item in request.generation_plan
+                }
+                if request.generation_plan is not None
+                else None
+            ),
         )
     except ServiceError as exc:
         raise_http_for_service_error(exc)

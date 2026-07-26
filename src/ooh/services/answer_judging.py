@@ -4,6 +4,10 @@ from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
+from ooh.agent.contracts import (
+    generated_test_grading_payload,
+    normalize_submitted_answer_payload,
+)
 from ooh.agent.answer_judging_runner import AnswerJudgingRunResult, AnswerJudgingRunService
 from ooh.db.models import GeneratedTestRead, JobRead, JobType, TestAnswerRead, TestResultRead
 from ooh.db.repos import (
@@ -14,7 +18,7 @@ from ooh.db.repos import (
     TestAnswerRepo,
     TestResultRepo,
 )
-from ooh.services.exceptions import NotFoundError
+from ooh.services.exceptions import ConflictError, NotFoundError
 
 
 @dataclass(frozen=True)
@@ -53,10 +57,18 @@ class AnswerJudgingService:
         if generated_test is None:
             raise NotFoundError("generated test not found")
 
+        try:
+            normalized_answer_payload = normalize_submitted_answer_payload(
+                answer_payload,
+                generated_test_payload=generated_test.test_payload,
+            )
+        except ValueError as exc:
+            raise ConflictError(f"answer does not match generated test: {exc}") from exc
+
         answer = self.test_answer_repo.create(
             TestAnswerInput(
                 generated_test_id=generated_test_id,
-                answer_payload=answer_payload,
+                answer_payload=normalized_answer_payload,
             )
         )
         judge_job = self.job_repo.enqueue(
@@ -77,6 +89,10 @@ class AnswerJudgingService:
     def list_results(self, generated_test_id: UUID) -> list[TestResultRead]:
         self._get_generated_test(generated_test_id)
         return self.test_result_repo.list_for_generated_test(generated_test_id)
+
+    def get_grading_guidance(self, generated_test_id: UUID) -> dict[str, Any]:
+        generated_test = self._get_generated_test(generated_test_id)
+        return generated_test_grading_payload(generated_test.test_payload)
 
     def list_repository_results(self, repository_id: UUID) -> list[TestResultRead]:
         if self.repository_repo.get(repository_id) is None:

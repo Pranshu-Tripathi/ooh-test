@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ooh.agent.contracts import GeneratedTestPublicPayload, generated_test_public_payload
 from ooh.db.models import (
     AttentionFocusAreaRead,
     AttentionProfileRead,
@@ -23,6 +24,10 @@ from ooh.db.models import (
     RepositoryScheduleRead,
     RepositorySourceType,
     RepositoryStatus,
+)
+from ooh.generation_config import (
+    MAX_GENERATION_QUESTIONS_PER_CATEGORY,
+    MAX_GENERATION_QUESTIONS_PER_JOB,
 )
 
 
@@ -95,8 +100,40 @@ class RepositoryRegistrationResponse(BaseModel):
     ingest_job: JobResponse
 
 
+class GenerationPlanItemRequest(BaseModel):
+    category: ContextPackType
+    question_count: int = Field(ge=1, le=MAX_GENERATION_QUESTIONS_PER_CATEGORY)
+
+
 class GenerateTestJobRequest(BaseModel):
     pack_types: list[ContextPackType] | None = Field(default=None, min_length=1, max_length=5)
+    generation_plan: list[GenerationPlanItemRequest] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=5,
+    )
+
+    @model_validator(mode="after")
+    def generation_plan_must_be_bounded(self) -> "GenerateTestJobRequest":
+        if self.pack_types is not None and self.generation_plan is not None:
+            raise ValueError("provide generation_plan or pack_types, not both")
+        if self.pack_types is not None and len(set(self.pack_types)) != len(self.pack_types):
+            raise ValueError("pack_types must not contain duplicates")
+        if self.generation_plan is None:
+            return self
+
+        categories = [item.category for item in self.generation_plan]
+        if len(set(categories)) != len(categories):
+            raise ValueError("generation_plan categories must not contain duplicates")
+        if (
+            sum(item.question_count for item in self.generation_plan)
+            > MAX_GENERATION_QUESTIONS_PER_JOB
+        ):
+            raise ValueError(
+                "generation_plan cannot request more than "
+                f"{MAX_GENERATION_QUESTIONS_PER_JOB} questions"
+            )
+        return self
 
 
 class RepositoryScheduleUpdateRequest(BaseModel):
@@ -155,8 +192,7 @@ class GeneratedTestResponse(BaseModel):
     agent_run_id: UUID | None
     context_pack_id: UUID | None
     category: str
-    test_payload: dict[str, Any]
-    evidence_refs: list[dict[str, Any]]
+    presentation_payload: GeneratedTestPublicPayload
     prompt_version: str | None
     created_at: datetime
 
@@ -170,8 +206,7 @@ class GeneratedTestResponse(BaseModel):
             agent_run_id=generated_test.agent_run_id,
             context_pack_id=generated_test.context_pack_id,
             category=generated_test.category.value,
-            test_payload=generated_test.test_payload,
-            evidence_refs=generated_test.evidence_refs,
+            presentation_payload=generated_test_public_payload(generated_test.test_payload),
             prompt_version=generated_test.prompt_version,
             created_at=generated_test.created_at,
         )

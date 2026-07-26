@@ -14,6 +14,10 @@ from ooh.api.routes.tests import router as tests_router
 from ooh.api.routes.traces import router as traces_router
 from ooh.config import get_settings
 from ooh.db import check_database, check_schema_current
+from ooh.generation_config import (
+    MAX_GENERATION_QUESTIONS_PER_CATEGORY,
+    MAX_GENERATION_QUESTIONS_PER_JOB,
+)
 from ooh.health import check_cache_writable
 from ooh.logging import configure_logging
 
@@ -64,7 +68,7 @@ def readyz() -> dict[str, str]:
 
 
 @app.get("/runtime")
-def runtime() -> dict[str, str]:
+def runtime() -> dict[str, str | int]:
     return {
         "env": settings.env,
         "cache_root": str(settings.cache_root),
@@ -72,6 +76,13 @@ def runtime() -> dict[str, str]:
         "ollama_base_url": settings.ollama_base_url,
         "test_generator_model": settings.test_generator_model,
         "answer_judge_model": settings.answer_judge_model,
+        "generation_questions_per_category": (
+            settings.generation_questions_per_category
+        ),
+        "generation_max_questions_per_category": (
+            MAX_GENERATION_QUESTIONS_PER_CATEGORY
+        ),
+        "generation_max_questions_per_job": MAX_GENERATION_QUESTIONS_PER_JOB,
     }
 
 
