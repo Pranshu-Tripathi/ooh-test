@@ -1,19 +1,34 @@
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
 
-from ooh.db.models import ContextPackType, RepositoryScheduleRead
-from ooh.db.repos import RepositoryRepo, RepositoryScheduleRepo
+from ooh.db.models import ContextPackType, JobStatus, JobType, RepositoryScheduleRead
+from ooh.db.repos import JobRepo, RepositoryRepo, RepositoryScheduleRepo
 from ooh.generation_config import (
     MAX_GENERATION_QUESTIONS_PER_CATEGORY,
     MAX_GENERATION_QUESTIONS_PER_JOB,
     validate_default_generation_questions_per_category,
 )
 from ooh.services.exceptions import NotFoundError
+from ooh.scheduler.repository_change_detector import GitRepositoryChangeDetector
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class RepositoryPollResult:
+    checked_count: int
+    unchanged_count: int
+    changed_count: int
+    enqueued_count: int
+    active_count: int
+    failed_count: int
 
 
 @dataclass(frozen=True)
 class SchedulerTickResult:
+    repository_poll: RepositoryPollResult | None
     evaluated_count: int
     triggered_count: int
 
@@ -24,10 +39,14 @@ class SchedulerService:
         *,
         repository_repo: RepositoryRepo,
         repository_schedule_repo: RepositoryScheduleRepo,
+        job_repo: JobRepo | None = None,
+        repository_change_detector: GitRepositoryChangeDetector | None = None,
         questions_per_category_default: int,
     ) -> None:
         self.repository_repo = repository_repo
         self.repository_schedule_repo = repository_schedule_repo
+        self.job_repo = job_repo
+        self.repository_change_detector = repository_change_detector
         self.questions_per_category_default = validate_default_generation_questions_per_category(
             questions_per_category_default
         )
@@ -91,14 +110,124 @@ class SchedulerService:
             max_questions_per_trigger=max_questions_per_trigger,
         )
 
-    def tick(self, *, batch_size: int) -> SchedulerTickResult:
+    def tick(
+        self,
+        *,
+        batch_size: int,
+        poll_repositories: bool = False,
+    ) -> SchedulerTickResult:
+        repository_poll = self.poll_repositories() if poll_repositories else None
         evaluations = self.repository_schedule_repo.evaluate_pending(
             limit=batch_size,
             questions_per_category=self.questions_per_category_default,
         )
         return SchedulerTickResult(
+            repository_poll=repository_poll,
             evaluated_count=len(evaluations),
             triggered_count=sum(1 for evaluation in evaluations if evaluation.matched),
+        )
+
+    def poll_repositories(self) -> RepositoryPollResult:
+        if self.job_repo is None or self.repository_change_detector is None:
+            raise RuntimeError("repository polling dependencies are not configured")
+
+        repositories = self.repository_repo.list_all()
+        unchanged_count = 0
+        changed_count = 0
+        enqueued_count = 0
+        active_count = 0
+        failed_count = 0
+
+        for repository in repositories:
+            if self.job_repo.has_active_repository_job(
+                repository_id=repository.id,
+                job_type=JobType.INGEST_REPOSITORY,
+            ):
+                active_count += 1
+                logger.debug(
+                    "repository poll skipped active ingestion repository_id=%s",
+                    repository.id,
+                )
+                continue
+
+            try:
+                head = self.repository_change_detector.detect(repository)
+                if head.commit_sha == repository.last_processed_commit_sha:
+                    unchanged_count += 1
+                    logger.debug(
+                        "repository unchanged repository_id=%s commit_sha=%s",
+                        repository.id,
+                        head.commit_sha,
+                    )
+                    continue
+
+                changed_count += 1
+                logger.info(
+                    "repository change detected repository_id=%s from_commit_sha=%s "
+                    "to_commit_sha=%s ref=%s",
+                    repository.id,
+                    repository.last_processed_commit_sha,
+                    head.commit_sha,
+                    head.ref,
+                )
+                from_commit_sha = repository.last_processed_commit_sha or "baseline"
+                job = self.job_repo.enqueue(
+                    repository_id=repository.id,
+                    job_type=JobType.INGEST_REPOSITORY,
+                    payload={
+                        "repository_id": str(repository.id),
+                        "source_type": repository.source_type.value,
+                        "source_uri": repository.source_uri,
+                        "target_commit_sha": head.commit_sha,
+                        "trigger": {
+                            "type": "repository_poll",
+                            "ref": head.ref,
+                            "from_commit_sha": repository.last_processed_commit_sha,
+                        },
+                    },
+                    idempotency_key=(
+                        f"repository-ingest:{repository.id}:"
+                        f"{from_commit_sha}:{head.commit_sha}"
+                    ),
+                )
+                if job.status in {
+                    JobStatus.QUEUED,
+                    JobStatus.RUNNING,
+                    JobStatus.RETRY_WAIT,
+                }:
+                    enqueued_count += 1
+                    logger.info(
+                        "repository ingestion queued repository_id=%s job_id=%s "
+                        "target_commit_sha=%s",
+                        repository.id,
+                        job.id,
+                        head.commit_sha,
+                    )
+                else:
+                    failed_count += 1
+                    logger.warning(
+                        "repository ingestion not queued repository_id=%s job_id=%s "
+                        "target_commit_sha=%s existing_status=%s",
+                        repository.id,
+                        job.id,
+                        head.commit_sha,
+                        job.status.value,
+                    )
+            except Exception:
+                failed_count += 1
+                logger.exception(
+                    "repository poll failed repository_id=%s source_type=%s",
+                    repository.id,
+                    repository.source_type.value,
+                )
+
+        return RepositoryPollResult(
+            checked_count=len(repositories),
+            unchanged_count=unchanged_count,
+            changed_count=changed_count,
+            enqueued_count=enqueued_count,
+            active_count=active_count,
+            failed_count=failed_count,
         )
 
     def _ensure_repository_exists(self, repository_id: UUID) -> None:

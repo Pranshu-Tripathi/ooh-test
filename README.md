@@ -21,7 +21,7 @@ docker compose up --build
 ```
 
 Optionally copy `.env.example` to `.env` if you want to override ports, model names, or
-the read-only repository mount used by the worker.
+the read-only repository mount used by the scheduler and worker.
 
 Test generation defaults to the available `qwen3:8b` Ollama model. The generation prompt is
 limited to 8,000 UTF-8 bytes, including instructions, repair feedback, and repository context;
@@ -58,7 +58,8 @@ curl -X POST http://localhost:8500/repositories \
   -d '{"source_type":"github","source_uri":"https://github.com/owner/repo.git"}'
 ```
 
-Enqueue another ingest after new commits land:
+The scheduler detects new commits and enqueues ingestion automatically. The endpoint remains
+available for an explicit re-ingest:
 
 ```bash
 curl -X POST http://localhost:8500/repositories/{repository_id}/ingest-jobs
@@ -92,10 +93,17 @@ curl -X PUT http://localhost:8500/repositories/{repository_id}/schedule \
 curl http://localhost:8500/repositories/{repository_id}/schedule
 ```
 
-The scheduler records every evaluation, ignores baseline drift, and uses an idempotency key derived
-from the schedule and drift event. Enabling a schedule starts from that moment and does not replay
-older drift events. Scheduled generation remains bound to the snapshot and drift event that caused
-the trigger.
+The scheduler polls local `HEAD` or the configured remote branch at
+`OOH_REPOSITORY_POLL_INTERVAL_SECONDS`, skips repositories with an active ingestion job, and
+deduplicates ingestion by repository and commit range. Multiple commits since the last successful
+ingestion are handled as one aggregate range. Ingestion checks out the exact detected commit,
+creates the snapshot, calculates and persists drift, and only then advances the repository's
+processed commit. Uncommitted local files are not ingested.
+
+The scheduler then records every drift evaluation, ignores baseline drift, and uses an idempotency
+key derived from the schedule and drift event. Enabling a schedule starts from that moment and does
+not replay older drift events. Scheduled generation remains bound to the snapshot and drift event
+that caused the trigger.
 
 Build deterministic context packs from the latest snapshot:
 
@@ -175,12 +183,12 @@ curl -X POST http://localhost:8500/repositories/{repository_id}/attention-profil
   }'
 ```
 
-Repository registration stores metadata and enqueues an `ingest_repository` job. The worker
-expects local `source_uri` values to be paths visible inside the container. By default, Compose
-mounts the current project at `/workspace`; set
+Repository registration stores metadata and enqueues an `ingest_repository` job. The scheduler and
+worker expect local `source_uri` values to be paths visible inside their containers. By default,
+Compose mounts the current project at `/workspace`; set
 `OOH_REPOSITORY_MOUNT=/host/path:/workspace:ro` in `.env` to inspect a different local
-repository. GitHub repositories are cloned or fast-forwarded under `OOH_CACHE_ROOT`, which
-Compose mounts to `.ooh_cache/` in this project.
+repository. The worker creates a detached, committed-tree checkout under `OOH_CACHE_ROOT` for both
+local and GitHub sources, which Compose mounts to `.ooh_cache/` in this project.
 
 The worker creates a deterministic metadata snapshot in `OOH_CACHE_ROOT`, records a
 `repo_snapshots` row, discovers guidance files such as `AGENTS.md`, `README.md`, `.cursor/**`,
@@ -208,8 +216,9 @@ reclaimed attempt. Set `OOH_WORKER_JOB_TYPES` to a comma-separated list such as
 `ingest_repository,compute_drift` when running role-specific worker replicas. Logs default to JSON
 for container collection; set `OOH_LOG_FORMAT=text` for local human-readable output.
 
-The Compose scheduler polls continuously. A future Kubernetes CronJob can run the same behavior once
-with:
+The Compose scheduler logs an INFO heartbeat after every repository poll, including checked,
+unchanged, changed, queued, active, and failed counts. It also evaluates durable drift events every
+`OOH_SCHEDULER_POLL_INTERVAL_SECONDS`. A future Kubernetes CronJob can run both behaviors once with:
 
 ```bash
 python -m ooh.scheduler.main --once
