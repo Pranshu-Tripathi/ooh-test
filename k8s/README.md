@@ -17,7 +17,7 @@ The wrapper always supplies `--context docker-desktop --namespace ooh-test` and 
 `kubectl config` commands. This is important on machines whose active context points at another
 cluster.
 
-## Checkpoint 1: provider and isolation
+## Provider and isolation
 
 Prerequisites:
 
@@ -33,8 +33,41 @@ Create or reconcile the project namespace:
 ./scripts/kubectl-ooh-test get namespace ooh-test
 ```
 
-At this checkpoint, the namespace is the only runtime resource. Compose remains usable and no
-application workload has moved to Kubernetes yet.
+Compose remains usable throughout the rollout.
+
+## Checkpoint 2: configuration, secrets, and storage
+
+The base currently creates:
+
+- `ooh-runtime`, a ConfigMap containing the non-secret Phase 2 runtime defaults;
+- `ooh-database`, a Secret containing local-only Postgres bootstrap credentials and the application
+  database URL;
+- `postgres-data`, a 5 GiB PVC for Postgres;
+- `ooh-cache`, a 10 GiB PVC shared by the API and workers in later checkpoints.
+
+Apply and inspect the checkpoint:
+
+```bash
+./scripts/kubectl-ooh-test apply -k k8s/base
+./scripts/kubectl-ooh-test get configmap,secret,pvc
+```
+
+The committed database password is intentionally a non-sensitive development credential, like the
+existing Compose defaults. Never add GitHub tokens, personal access tokens, encryption keys, or
+non-local database credentials to this manifest.
+
+Compose-only host-port settings are omitted because Kubernetes access uses `kubectl port-forward`.
+`OOH_WORKER_JOB_TYPES` will be set per role-specific Deployment, and `OOH_REPOSITORY_MOUNT` remains
+deferred until the Docker Desktop read-only local-repository mount checkpoint.
+
+Both PVCs use Docker Desktop's `standard` local-path StorageClass and `ReadWriteOnce`. Docker
+Desktop is a single-node cluster, so the cache may be mounted by multiple project pods scheduled on
+that node. The StorageClass uses `WaitForFirstConsumer`; the PVCs remain `Pending` until workloads
+mount them in the Postgres and API checkpoints. This state is expected and does not indicate a
+failed checkpoint.
+
+Deleting either PVC is destructive. Docker Desktop's local-path volumes use a `Delete` reclaim
+policy, so deleting a claim can delete its stored data.
 
 ## Network and port contract
 

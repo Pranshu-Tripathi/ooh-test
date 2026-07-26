@@ -4,4 +4,7 @@ kind: Kustomization
 namespace: ooh-test
 
 resources:
+  - configmap.yaml
+  - database-secret.yaml
   - namespace.yaml
+  - storage.yaml
