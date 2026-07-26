@@ -134,8 +134,21 @@ class RepositoryService:
 
         self.repository_repo.mark_indexing(job.repository_id)
         repository = self._get_repository(job.repository_id)
-        resolved_source = self.repository_source_resolver.resolve(repository)
+        target_commit_sha = job.payload.get("target_commit_sha")
+        if target_commit_sha is not None:
+            if not isinstance(target_commit_sha, str) or not target_commit_sha.strip():
+                raise ValueError("target_commit_sha must be a non-empty string")
+            target_commit_sha = target_commit_sha.strip()
+        resolved_source = self.repository_source_resolver.resolve(
+            repository,
+            target_commit_sha=target_commit_sha,
+        )
         snapshot = self.repository_inspector.inspect_path(repository, resolved_source.path)
+        if target_commit_sha is not None and snapshot.commit_sha != target_commit_sha:
+            raise RuntimeError(
+                "resolved repository commit did not match the ingestion target: "
+                f"expected {target_commit_sha}, got {snapshot.commit_sha}"
+            )
         snapshot_record = self.repo_snapshot_repo.create(
             repository_id=job.repository_id,
             commit_sha=snapshot.commit_sha,

@@ -31,6 +31,7 @@ from ooh.services.repositories import RepositoryService
 from ooh.services.scheduler import SchedulerService
 from ooh.services.test_generation import TestGenerationService
 from ooh.services.traces import TraceService
+from ooh.scheduler.repository_change_detector import GitRepositoryChangeDetector
 from ooh.worker.context_pack_builder import ContextPackBuilder
 from ooh.worker.drift_scorer import GitDriftScorer
 from ooh.worker.repository_inspector import LocalRepositoryInspector
@@ -175,6 +176,10 @@ def build_scheduler_service(
     return SchedulerService(
         repository_repo=RepositoryRepo(db),
         repository_schedule_repo=RepositoryScheduleRepo(db),
+        job_repo=JobRepo(db),
+        repository_change_detector=GitRepositoryChangeDetector(
+            command_timeout_seconds=settings.repository_poll_timeout_seconds
+        ),
         questions_per_category_default=settings.generation_questions_per_category,
     )
 

@@ -10,10 +10,13 @@ def test_scheduler_tables_encode_durable_idempotent_evaluation() -> None:
         "drift_min_score",
         "drift_max_score",
         "pack_types",
+        "generation_plan",
+        "max_questions_per_trigger",
         "active_since",
     } <= set(schedule_table.columns.keys())
     assert {constraint.name for constraint in schedule_table.constraints} >= {
         "ck_repository_schedules_min_score",
+        "ck_repository_schedules_question_limit",
         "ck_repository_schedules_score_range",
         "uq_repository_schedules_repository",
     }

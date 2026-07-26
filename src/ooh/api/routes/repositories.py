@@ -64,7 +64,9 @@ def get_repository(repository_id: UUID) -> RepositoryResponse:
     return RepositoryResponse.from_record(repository)
 
 
-@router.post("/{repository_id}/ingest-jobs", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/{repository_id}/ingest-jobs", response_model=JobResponse, status_code=status.HTTP_202_ACCEPTED
+)
 def enqueue_repository_ingest(repository_id: UUID) -> JobResponse:
     try:
         ingest_job = repository_service.enqueue_repository_ingest(repository_id)
@@ -88,10 +90,7 @@ def enqueue_generate_test_job(
             repository_id,
             pack_types=request.pack_types,
             question_counts=(
-                {
-                    item.category: item.question_count
-                    for item in request.generation_plan
-                }
+                {item.category: item.question_count for item in request.generation_plan}
                 if request.generation_plan is not None
                 else None
             ),
@@ -128,6 +127,12 @@ def update_repository_schedule(
             drift_min_score=request.drift_min_score,
             drift_max_score=request.drift_max_score,
             pack_types=request.pack_types,
+            question_counts=(
+                {item.category: item.question_count for item in request.generation_plan}
+                if request.generation_plan is not None
+                else None
+            ),
+            max_questions_per_trigger=request.max_questions_per_trigger,
         )
     except ServiceError as exc:
         raise_http_for_service_error(exc)
@@ -171,7 +176,10 @@ def list_attention_profiles(repository_id: UUID) -> list[AttentionProfileRespons
         profiles = repository_service.list_attention_profiles(repository_id)
     except ServiceError as exc:
         raise_http_for_service_error(exc)
-    return [AttentionProfileResponse.from_records(profile.profile, profile.focus_areas) for profile in profiles]
+    return [
+        AttentionProfileResponse.from_records(profile.profile, profile.focus_areas)
+        for profile in profiles
+    ]
 
 
 @router.post(
@@ -195,7 +203,9 @@ def build_context_packs(repository_id: UUID) -> list[ContextPackResponse]:
         created_packs = repository_service.build_context_packs(repository_id)
     except ServiceError as exc:
         raise_http_for_service_error(exc)
-    return [ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in created_packs]
+    return [
+        ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in created_packs
+    ]
 
 
 @router.get("/{repository_id}/context-packs", response_model=list[ContextPackResponse])
@@ -204,7 +214,9 @@ def list_context_packs(repository_id: UUID) -> list[ContextPackResponse]:
         context_packs = repository_service.list_context_packs(repository_id)
     except ServiceError as exc:
         raise_http_for_service_error(exc)
-    return [ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in context_packs]
+    return [
+        ContextPackResponse.from_records(pack.context_pack, pack.sources) for pack in context_packs
+    ]
 
 
 @router.get("/{repository_id}/generated-tests", response_model=list[GeneratedTestResponse])

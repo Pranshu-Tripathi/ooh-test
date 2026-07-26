@@ -5,7 +5,6 @@ from sqlalchemy import exists, func, select
 
 from ooh.db.connection import Database
 from ooh.db.models import (
-    ContextPackType,
     DriftEvent,
     DriftTriggerEvaluation,
     DriftTriggerEvaluationRead,
@@ -25,9 +24,7 @@ class RepositoryScheduleRepo:
     def get_for_repository(self, repository_id: UUID) -> RepositoryScheduleRead | None:
         with self.db.session() as session:
             schedule = session.scalar(
-                select(RepositorySchedule).where(
-                    RepositorySchedule.repository_id == repository_id
-                )
+                select(RepositorySchedule).where(RepositorySchedule.repository_id == repository_id)
             )
             if schedule is None:
                 return None
@@ -40,8 +37,10 @@ class RepositoryScheduleRepo:
         enabled: bool,
         drift_min_score: Decimal,
         drift_max_score: Decimal | None,
-        pack_types: list[ContextPackType],
+        generation_plan: list[dict[str, object]],
+        max_questions_per_trigger: int,
     ) -> RepositoryScheduleRead:
+        pack_types = [str(item["category"]) for item in generation_plan]
         with self.db.session() as session:
             schedule = session.scalar(
                 select(RepositorySchedule)
@@ -54,7 +53,9 @@ class RepositoryScheduleRepo:
                     enabled=enabled,
                     drift_min_score=drift_min_score,
                     drift_max_score=drift_max_score,
-                    pack_types=[pack_type.value for pack_type in pack_types],
+                    pack_types=pack_types,
+                    generation_plan=generation_plan,
+                    max_questions_per_trigger=max_questions_per_trigger,
                 )
                 session.add(schedule)
             else:
@@ -64,7 +65,9 @@ class RepositoryScheduleRepo:
                 schedule.enabled = enabled
                 schedule.drift_min_score = drift_min_score
                 schedule.drift_max_score = drift_max_score
-                schedule.pack_types = [pack_type.value for pack_type in pack_types]
+                schedule.pack_types = pack_types
+                schedule.generation_plan = generation_plan
+                schedule.max_questions_per_trigger = max_questions_per_trigger
                 schedule.updated_at = func.now()
             session.flush()
             session.refresh(schedule)
@@ -83,6 +86,8 @@ class RepositoryScheduleRepo:
                             else None
                         ),
                         "pack_types": schedule.pack_types,
+                        "generation_plan": schedule.generation_plan,
+                        "max_questions_per_trigger": schedule.max_questions_per_trigger,
                         "active_since": schedule.active_since.isoformat(),
                     },
                 ),
@@ -132,6 +137,13 @@ class RepositoryScheduleRepo:
                 )
                 job = None
                 if matched:
+                    generation_plan = schedule.generation_plan or [
+                        {
+                            "category": pack_type,
+                            "question_count": questions_per_category,
+                        }
+                        for pack_type in schedule.pack_types
+                    ]
                     job = enqueue_job(
                         session,
                         repository_id=schedule.repository_id,
@@ -141,13 +153,7 @@ class RepositoryScheduleRepo:
                             "repository_id": str(schedule.repository_id),
                             "snapshot_id": str(drift_event.snapshot_id),
                             "drift_event_id": str(drift_event.id),
-                            "generation_plan": [
-                                {
-                                    "category": pack_type,
-                                    "question_count": questions_per_category,
-                                }
-                                for pack_type in schedule.pack_types
-                            ],
+                            "generation_plan": generation_plan,
                             "trigger": {
                                 "type": "drift_score_range",
                                 "repository_schedule_id": str(schedule.id),
@@ -157,6 +163,8 @@ class RepositoryScheduleRepo:
                                     if schedule.drift_max_score is not None
                                     else None
                                 ),
+                                "generation_plan": generation_plan,
+                                "max_questions_per_trigger": (schedule.max_questions_per_trigger),
                             },
                         },
                     )
@@ -170,6 +178,8 @@ class RepositoryScheduleRepo:
                         else None
                     ),
                     "pack_types": schedule.pack_types,
+                    "generation_plan": schedule.generation_plan,
+                    "max_questions_per_trigger": schedule.max_questions_per_trigger,
                 }
                 evaluation = DriftTriggerEvaluation(
                     repository_schedule_id=schedule.id,

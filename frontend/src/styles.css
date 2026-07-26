@@ -959,7 +959,8 @@ h3 {
 }
 
 .schedule-form {
-  padding: 14px;
+  gap: 14px;
+  padding: 18px;
 }
 
 .checkbox-label {
@@ -970,6 +971,286 @@ h3 {
 .checkbox-label input {
   height: 16px;
   width: 16px;
+}
+
+.settings-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(320px, 0.92fr);
+}
+
+.settings-form,
+.profile-library {
+  padding: 18px;
+}
+
+.profile-library {
+  background: #f8faf9;
+  border-left: 1px solid var(--line);
+}
+
+.settings-intro {
+  display: block;
+  margin-top: 3px;
+}
+
+.settings-section-heading,
+.focus-area-heading,
+.automation-toggle,
+.generation-limit {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.focus-area-list,
+.profile-list,
+.profile-focus-areas,
+.generation-mix-list,
+.advanced-range {
+  display: grid;
+  gap: 10px;
+}
+
+.focus-area-card {
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  min-width: 0;
+  padding: 12px;
+}
+
+.focus-area-card legend {
+  color: #33413d;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 0 5px;
+}
+
+.focus-area-card textarea {
+  min-height: 70px;
+}
+
+.profile-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+}
+
+.profile-card.active {
+  border-color: rgba(15, 118, 110, 0.38);
+  box-shadow: inset 3px 0 0 var(--teal);
+}
+
+.profile-card .item-card-header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.profile-focus-area {
+  background: #f7f8f7;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: grid;
+  gap: 5px;
+  padding: 9px;
+}
+
+.profile-focus-area code {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.weight-badge {
+  background: #e9f4f2;
+  border: 1px solid #c9e4df;
+  border-radius: 999px;
+  color: var(--teal-dark);
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 7px;
+}
+
+.automation-toggle {
+  background: #f8faf9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: 62px;
+  padding: 12px 14px;
+}
+
+.automation-toggle > div,
+.generation-limit > div {
+  display: grid;
+  gap: 3px;
+}
+
+.switch {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 8px;
+}
+
+.switch input {
+  height: 1px;
+  opacity: 0;
+  position: absolute;
+  width: 1px;
+}
+
+.switch > span {
+  background: #cbd4d0;
+  border-radius: 999px;
+  height: 24px;
+  position: relative;
+  transition: background 0.18s ease;
+  width: 42px;
+}
+
+.switch > span::after {
+  background: #ffffff;
+  border-radius: 50%;
+  box-shadow: 0 1px 3px rgba(24, 33, 31, 0.25);
+  content: "";
+  height: 18px;
+  left: 3px;
+  position: absolute;
+  top: 3px;
+  transition: transform 0.18s ease;
+  width: 18px;
+}
+
+.switch input:checked + span {
+  background: var(--teal);
+}
+
+.switch input:checked + span::after {
+  transform: translateX(18px);
+}
+
+.switch input:focus-visible + span {
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.18);
+}
+
+.switch em {
+  color: var(--text);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.settings-block {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.settings-section-heading > div {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-section-heading > button.active {
+  background: #fff7ed;
+  border-color: #f3c178;
+  color: #74460b;
+}
+
+.threshold-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.threshold-grid button {
+  align-items: flex-start;
+  display: grid;
+  gap: 4px;
+  justify-items: start;
+  min-height: 88px;
+  padding: 10px;
+  text-align: left;
+}
+
+.threshold-grid button span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.threshold-grid button.active {
+  background: #eef7f5;
+  border-color: var(--teal);
+  box-shadow: inset 0 0 0 1px var(--teal);
+}
+
+.threshold-grid button.active code {
+  color: var(--teal-dark);
+}
+
+.advanced-range .notice {
+  align-items: flex-start;
+}
+
+.generation-mix-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.generation-mix-row {
+  align-items: center;
+  background: #fbfcfb;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  min-height: 64px;
+  padding: 9px 10px;
+}
+
+.generation-mix-row.selected {
+  background: #f3f9f7;
+  border-color: #b9dad4;
+}
+
+.generation-mix-row > label:last-child input {
+  height: 30px;
+}
+
+.generation-limit {
+  background: #f8faf9;
+  border-radius: 7px;
+  padding: 10px;
+}
+
+.generation-limit > label {
+  width: 120px;
+}
+
+.question-total {
+  background: rgba(22, 112, 68, 0.1);
+  border: 1px solid rgba(22, 112, 68, 0.25);
+  border-radius: 999px;
+  color: var(--green);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+
+.question-total.bad {
+  background: rgba(180, 35, 24, 0.08);
+  border-color: rgba(180, 35, 24, 0.22);
+  color: var(--red);
 }
 
 .node-dot {
@@ -1436,8 +1717,14 @@ button.trace-flow-group-header:hover {
   .metric-grid,
   .two-column,
   .two-column.wide-right,
-  .test-session-layout {
+  .test-session-layout,
+  .settings-split {
     grid-template-columns: 1fr;
+  }
+
+  .profile-library {
+    border-left: 0;
+    border-top: 1px solid var(--line);
   }
 
   .page-title {
@@ -1477,6 +1764,22 @@ button.trace-flow-group-header:hover {
   .question-actions,
   .evidence-row {
     grid-template-columns: 1fr;
+  }
+
+  .threshold-grid,
+  .generation-mix-list {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-section-heading,
+  .automation-toggle,
+  .generation-limit {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .generation-limit > label {
+    width: 100%;
   }
 
   .question-actions button {

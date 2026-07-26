@@ -1,6 +1,7 @@
 import logging
 import signal
 import sys
+from time import monotonic
 from threading import Event
 
 from ooh.config import get_settings
@@ -29,17 +30,38 @@ class SchedulerProcess:
         check_schema_current()
         logger.info(
             "scheduler started poll_interval_seconds=%s batch_size=%s "
-            "questions_per_category=%s once=%s",
+            "repository_poll_interval_seconds=%s questions_per_category=%s once=%s",
             self.settings.scheduler_poll_interval_seconds,
             self.settings.scheduler_batch_size,
+            self.settings.repository_poll_interval_seconds,
             self.settings.generation_questions_per_category,
             once,
         )
 
+        next_repository_poll_at = 0.0
         while not self.stop_event.is_set():
+            poll_repositories = monotonic() >= next_repository_poll_at
+            poll_started_at = monotonic()
             result = self.scheduler_service.tick(
-                batch_size=self.settings.scheduler_batch_size
+                batch_size=self.settings.scheduler_batch_size,
+                poll_repositories=poll_repositories,
             )
+            if result.repository_poll is not None:
+                repository_poll = result.repository_poll
+                logger.info(
+                    "repository poll completed checked=%s unchanged=%s changed=%s "
+                    "enqueued=%s active=%s failed=%s duration_ms=%s",
+                    repository_poll.checked_count,
+                    repository_poll.unchanged_count,
+                    repository_poll.changed_count,
+                    repository_poll.enqueued_count,
+                    repository_poll.active_count,
+                    repository_poll.failed_count,
+                    round((monotonic() - poll_started_at) * 1000),
+                )
+                next_repository_poll_at = (
+                    monotonic() + self.settings.repository_poll_interval_seconds
+                )
             if result.evaluated_count:
                 logger.info(
                     "scheduler tick evaluated=%s triggered=%s",

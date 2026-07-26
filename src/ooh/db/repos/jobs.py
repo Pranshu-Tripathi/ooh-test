@@ -41,6 +41,30 @@ class JobRepo:
                 idempotency_key=idempotency_key,
             )
 
+    def has_active_repository_job(
+        self,
+        *,
+        repository_id: UUID,
+        job_type: JobType,
+    ) -> bool:
+        with self.db.session() as session:
+            job_id = session.scalar(
+                select(Job.id)
+                .where(
+                    Job.repository_id == repository_id,
+                    Job.job_type == job_type,
+                    Job.status.in_(
+                        [
+                            JobStatus.QUEUED,
+                            JobStatus.RUNNING,
+                            JobStatus.RETRY_WAIT,
+                        ]
+                    ),
+                )
+                .limit(1)
+            )
+            return job_id is not None
+
     def claim_next(
         self,
         *,
