@@ -86,6 +86,11 @@ export type RepositorySchedule = {
   drift_min_score: string;
   drift_max_score: string | null;
   pack_types: string[];
+  generation_plan: Array<{
+    category: string;
+    question_count: number;
+  }>;
+  max_questions_per_trigger: number;
   active_since: string;
   created_at: string;
   updated_at: string;

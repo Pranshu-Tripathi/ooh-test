@@ -99,6 +99,14 @@ type AnswerDraft = {
   selectedOptionIds: string[];
 };
 
+type FocusAreaDraft = {
+  key: string;
+  name: string;
+  description: string;
+  pathGlobs: string;
+  weight: string;
+};
+
 type TestSessionProgress = Record<
   string,
   {
@@ -131,6 +139,36 @@ const PACK_TYPES = [
   "future_improvements",
   "active_pr"
 ];
+
+const DRIFT_PRESETS = [
+  {
+    name: "Low",
+    score: "0",
+    description: "Every recorded change"
+  },
+  {
+    name: "Medium",
+    score: "25",
+    description: "Medium and high drift"
+  },
+  {
+    name: "High",
+    score: "80",
+    description: "High-impact drift only"
+  }
+] as const;
+
+type DriftPresetScore = (typeof DRIFT_PRESETS)[number]["score"];
+
+function newFocusAreaDraft(): FocusAreaDraft {
+  return {
+    key: `${Date.now()}-${Math.random()}`,
+    name: "",
+    description: "",
+    pathGlobs: "",
+    weight: "1"
+  };
+}
 
 export function App() {
   const route = useHashRoute();
@@ -1485,15 +1523,60 @@ function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
   const repository = useAsyncData(() => api.getRepository(repositoryId), [repositoryId]);
   const profiles = useAsyncData(() => api.listAttentionProfiles(repositoryId), [repositoryId]);
   const schedule = useAsyncData(() => api.getRepositorySchedule(repositoryId), [repositoryId]);
+  const runtime = useAsyncData(api.getRuntime, []);
+
+  const [profileName, setProfileName] = useState("");
+  const [defaultWeight, setDefaultWeight] = useState("1");
+  const [activateNewProfile, setActivateNewProfile] = useState(true);
+  const [focusAreas, setFocusAreas] = useState<FocusAreaDraft[]>([newFocusAreaDraft()]);
+  const [profileBusy, setProfileBusy] = useState(false);
+  const [activatingProfileId, setActivatingProfileId] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileNotice, setProfileNotice] = useState<string | null>(null);
+
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [thresholdMode, setThresholdMode] = useState<"preset" | "advanced">("preset");
+  const [presetScore, setPresetScore] = useState<DriftPresetScore>("25");
   const [minimumScore, setMinimumScore] = useState("25");
   const [maximumScore, setMaximumScore] = useState("");
   const [scheduledPackTypes, setScheduledPackTypes] = useState<string[]>([
     "low_level_components"
   ]);
+  const [scheduledQuestionCounts, setScheduledQuestionCounts] = useState<
+    Record<string, number>
+  >({
+    low_level_components: 1
+  });
+  const [maxQuestionsPerTrigger, setMaxQuestionsPerTrigger] = useState("15");
   const [scheduleBusy, setScheduleBusy] = useState(false);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [savedSchedule, setSavedSchedule] = useState<RepositorySchedule | null>(null);
+  const defaultQuestionCount = runtime.data?.generation_questions_per_category ?? 1;
+  const maxQuestionsPerCategory =
+    runtime.data?.generation_max_questions_per_category ?? defaultQuestionCount;
+  const maxQuestionsPerJob =
+    runtime.data?.generation_max_questions_per_job ?? maxQuestionsPerCategory;
+  const scheduledQuestionTotal = scheduledPackTypes.reduce(
+    (total, packType) =>
+      total + (scheduledQuestionCounts[packType] ?? defaultQuestionCount),
+    0
+  );
+  const parsedQuestionLimit = Number(maxQuestionsPerTrigger);
+  const parsedMinimumScore = Number(minimumScore);
+  const parsedMaximumScore = maximumScore.trim() ? Number(maximumScore) : null;
+  const driftRangeIsValid =
+    thresholdMode === "preset" ||
+    (Number.isFinite(parsedMinimumScore) &&
+      parsedMinimumScore >= 0 &&
+      (parsedMaximumScore === null ||
+        (Number.isFinite(parsedMaximumScore) &&
+          parsedMaximumScore >= parsedMinimumScore)));
+  const generationMixIsValid =
+    scheduledPackTypes.length > 0 &&
+    Number.isInteger(parsedQuestionLimit) &&
+    parsedQuestionLimit >= 1 &&
+    parsedQuestionLimit <= maxQuestionsPerJob &&
+    scheduledQuestionTotal <= parsedQuestionLimit;
 
   useEffect(() => {
     if (!schedule.data) {
@@ -1504,9 +1587,104 @@ function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
     setMaximumScore(
       schedule.data.drift_max_score === null ? "" : String(schedule.data.drift_max_score)
     );
-    setScheduledPackTypes(schedule.data.pack_types);
+    const matchingPreset = DRIFT_PRESETS.find(
+      (preset) =>
+        Number(preset.score) === Number(schedule.data?.drift_min_score) &&
+        schedule.data?.drift_max_score === null
+    );
+    if (matchingPreset) {
+      setThresholdMode("preset");
+      setPresetScore(matchingPreset.score);
+    } else {
+      setThresholdMode("advanced");
+    }
+    const generationPlan =
+      schedule.data.generation_plan.length > 0
+        ? schedule.data.generation_plan
+        : schedule.data.pack_types.map((category) => ({
+            category,
+            question_count: defaultQuestionCount
+          }));
+    setScheduledPackTypes(generationPlan.map((item) => item.category));
+    setScheduledQuestionCounts(
+      Object.fromEntries(
+        generationPlan.map((item) => [item.category, item.question_count])
+      )
+    );
+    setMaxQuestionsPerTrigger(String(schedule.data.max_questions_per_trigger));
     setSavedSchedule(schedule.data);
-  }, [schedule.data]);
+  }, [defaultQuestionCount, schedule.data]);
+
+  useEffect(() => {
+    if (schedule.data) {
+      return;
+    }
+    setScheduledQuestionCounts((current) => ({
+      ...current,
+      low_level_components: defaultQuestionCount
+    }));
+    setMaxQuestionsPerTrigger(String(maxQuestionsPerJob));
+  }, [defaultQuestionCount, maxQuestionsPerJob, schedule.data]);
+
+  async function createProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setProfileBusy(true);
+    setProfileError(null);
+    setProfileNotice(null);
+    try {
+      const created = await api.createAttentionProfile(repositoryId, {
+        name: profileName.trim(),
+        default_weight: defaultWeight,
+        active: activateNewProfile,
+        focus_areas: focusAreas.map((area) => ({
+          name: area.name.trim(),
+          description: area.description.trim() || null,
+          weight: area.weight,
+          path_globs: area.pathGlobs
+            .split(/[,\n]/)
+            .map((pathGlob) => pathGlob.trim())
+            .filter(Boolean)
+        }))
+      });
+      setProfileName("");
+      setDefaultWeight("1");
+      setActivateNewProfile(true);
+      setFocusAreas([newFocusAreaDraft()]);
+      setProfileNotice(
+        `${created.name} was created${created.active ? " and activated" : ""}.`
+      );
+      await profiles.reload();
+    } catch (exc) {
+      setProfileError(errorMessage(exc));
+    } finally {
+      setProfileBusy(false);
+    }
+  }
+
+  async function activateProfile(profile: AttentionProfile) {
+    setActivatingProfileId(profile.id);
+    setProfileError(null);
+    setProfileNotice(null);
+    try {
+      await api.activateAttentionProfile(repositoryId, profile.id);
+      setProfileNotice(`${profile.name} is now the active attention profile.`);
+      await profiles.reload();
+    } catch (exc) {
+      setProfileError(errorMessage(exc));
+    } finally {
+      setActivatingProfileId(null);
+    }
+  }
+
+  function updateFocusArea(
+    key: string,
+    field: keyof Omit<FocusAreaDraft, "key">,
+    value: string
+  ) {
+    setFocusAreas((current) =>
+      current.map((area) => (area.key === key ? { ...area, [field]: value } : area))
+    );
+  }
 
   async function saveSchedule(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1515,9 +1693,19 @@ function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
     try {
       const updated = await api.updateRepositorySchedule(repositoryId, {
         enabled: scheduleEnabled,
-        drift_min_score: minimumScore,
-        drift_max_score: maximumScore.trim() ? maximumScore : null,
-        pack_types: scheduledPackTypes
+        drift_min_score: thresholdMode === "preset" ? presetScore : minimumScore,
+        drift_max_score:
+          thresholdMode === "preset"
+            ? null
+            : maximumScore.trim()
+              ? maximumScore
+              : null,
+        generation_plan: scheduledPackTypes.map((category) => ({
+          category,
+          question_count:
+            scheduledQuestionCounts[category] ?? defaultQuestionCount
+        })),
+        max_questions_per_trigger: parsedQuestionLimit
       });
       setSavedSchedule(updated);
       await schedule.reload();
@@ -1534,65 +1722,417 @@ function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
         icon={<Settings size={22} />}
         title={`${repository.data?.name ?? "Repository"} settings`}
         eyebrow="Automation and attention"
+        actions={
+          <a className="icon-link" href={`#/repositories/${repositoryId}`}>
+            <ChevronLeft size={16} />
+            Back to repository
+          </a>
+        }
       />
+      {repository.error ? (
+        <InlineError message={`Repository details unavailable: ${repository.error}`} />
+      ) : null}
+      {runtime.error ? (
+        <InlineError message={`Generation limits unavailable: ${runtime.error}`} />
+      ) : null}
+
       <section className="panel">
-        <PanelHeader title="Drift-triggered tests" icon={<Activity size={17} />} />
-        <form className="stack schedule-form" onSubmit={saveSchedule}>
-          <label className="row checkbox-label">
-            <input
-              checked={scheduleEnabled}
-              onChange={(event) => setScheduleEnabled(event.target.checked)}
-              type="checkbox"
-            />
-            <span>Generate tests when a new drift score enters this range</span>
-          </label>
-          <div className="two-column">
-            <label>
-              <span>Minimum score (inclusive)</span>
-              <input
-                min="0"
-                required
-                step="0.01"
-                type="number"
-                value={minimumScore}
-                onChange={(event) => setMinimumScore(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Maximum score (inclusive, optional)</span>
-              <input
-                min="0"
-                step="0.01"
-                type="number"
-                value={maximumScore}
-                onChange={(event) => setMaximumScore(event.target.value)}
-              />
-            </label>
-          </div>
-          <div>
-            <span className="muted">Test types</span>
-            <div className="segmented">
-              {PACK_TYPES.map((packType) => (
+        <PanelHeader title="Attention profiles" icon={<Layers size={17} />} />
+        <div className="settings-split">
+          <form className="stack settings-form" onSubmit={createProfile}>
+            <div>
+              <h3>Create an attention profile</h3>
+              <p className="muted settings-intro">
+                Weight the repository areas that should matter most when drift is scored and
+                questions are generated.
+              </p>
+            </div>
+            <div className="two-column">
+              <label>
+                <span>Profile name</span>
+                <input
+                  maxLength={200}
+                  onChange={(event) => setProfileName(event.target.value)}
+                  placeholder="Backend focus"
+                  required
+                  value={profileName}
+                />
+              </label>
+              <label>
+                <span>Default repository weight</span>
+                <input
+                  max="10"
+                  min="0"
+                  onChange={(event) => setDefaultWeight(event.target.value)}
+                  required
+                  step="0.1"
+                  type="number"
+                  value={defaultWeight}
+                />
+              </label>
+            </div>
+            <div className="focus-area-list">
+              <div className="settings-section-heading">
+                <div>
+                  <h3>Focus areas</h3>
+                  <span className="muted">Path globs can be comma or line separated.</span>
+                </div>
                 <button
-                  className={scheduledPackTypes.includes(packType) ? "active" : ""}
-                  key={packType}
                   onClick={() =>
-                    setScheduledPackTypes((current) =>
-                      current.includes(packType)
-                        ? current.filter((value) => value !== packType)
-                        : [...current, packType]
-                    )
+                    setFocusAreas((current) => [...current, newFocusAreaDraft()])
                   }
                   type="button"
                 >
-                  {labelize(packType)}
+                  <Plus size={14} />
+                  Add area
                 </button>
+              </div>
+              {focusAreas.map((area, index) => (
+                <fieldset className="focus-area-card" key={area.key}>
+                  <legend>Area {index + 1}</legend>
+                  <div className="focus-area-heading">
+                    <span className="muted">Files matching these globs receive this weight.</span>
+                    <IconButton
+                      disabled={focusAreas.length === 1}
+                      label={`Remove focus area ${index + 1}`}
+                      onClick={() =>
+                        setFocusAreas((current) =>
+                          current.filter((candidate) => candidate.key !== area.key)
+                        )
+                      }
+                    >
+                      <X size={14} />
+                    </IconButton>
+                  </div>
+                  <div className="two-column">
+                    <label>
+                      <span>Area name</span>
+                      <input
+                        maxLength={200}
+                        onChange={(event) =>
+                          updateFocusArea(area.key, "name", event.target.value)
+                        }
+                        placeholder="API and services"
+                        required
+                        value={area.name}
+                      />
+                    </label>
+                    <label>
+                      <span>Weight</span>
+                      <input
+                        max="10"
+                        min="0"
+                        onChange={(event) =>
+                          updateFocusArea(area.key, "weight", event.target.value)
+                        }
+                        required
+                        step="0.1"
+                        type="number"
+                        value={area.weight}
+                      />
+                    </label>
+                  </div>
+                  <label>
+                    <span>Description (optional)</span>
+                    <input
+                      maxLength={1000}
+                      onChange={(event) =>
+                        updateFocusArea(area.key, "description", event.target.value)
+                      }
+                      placeholder="Core request handling and business logic"
+                      value={area.description}
+                    />
+                  </label>
+                  <label>
+                    <span>Path globs</span>
+                    <textarea
+                      onChange={(event) =>
+                        updateFocusArea(area.key, "pathGlobs", event.target.value)
+                      }
+                      placeholder={"src/ooh/api/**\nsrc/ooh/services/**"}
+                      required
+                      rows={2}
+                      value={area.pathGlobs}
+                    />
+                  </label>
+                </fieldset>
               ))}
             </div>
+            <label className="row checkbox-label">
+              <input
+                checked={activateNewProfile}
+                onChange={(event) => setActivateNewProfile(event.target.checked)}
+                type="checkbox"
+              />
+              <span>Make this the active profile immediately</span>
+            </label>
+            {profileError ? <InlineError message={profileError} /> : null}
+            {profileNotice ? (
+              <div className="notice">
+                <CheckCircle2 size={15} />
+                {profileNotice}
+              </div>
+            ) : null}
+            <button
+              className="primary action-button"
+              disabled={profileBusy}
+              type="submit"
+            >
+              <Plus size={15} />
+              {profileBusy ? "Creating…" : "Create profile"}
+            </button>
+          </form>
+
+          <div className="profile-library">
+            <div>
+              <h3>Saved profiles</h3>
+              <p className="muted settings-intro">
+                One profile is active at a time. Activation affects the next repository
+                ingestion.
+              </p>
+            </div>
+            <AsyncBoundary state={profiles}>
+              <div className="profile-list">
+                {(profiles.data ?? []).map((profile: AttentionProfile) => (
+                  <article
+                    className={`profile-card ${profile.active ? "active" : ""}`}
+                    key={profile.id}
+                  >
+                    <div className="item-card-header">
+                      <div>
+                        <strong>{profile.name}</strong>
+                        <span className="muted">
+                          Default weight {String(profile.default_weight)}
+                        </span>
+                      </div>
+                      <StatusPill status={profile.active ? "active" : "saved"} />
+                    </div>
+                    <div className="profile-focus-areas">
+                      {profile.focus_areas.map((area) => (
+                        <div className="profile-focus-area" key={area.id}>
+                          <div className="item-card-header">
+                            <strong>{area.name}</strong>
+                            <span className="weight-badge">×{String(area.weight)}</span>
+                          </div>
+                          {area.description ? (
+                            <span className="muted">{area.description}</span>
+                          ) : null}
+                          <code>{area.path_globs.join(", ")}</code>
+                        </div>
+                      ))}
+                      {profile.focus_areas.length === 0 ? (
+                        <span className="muted">Uses the default weight for every path.</span>
+                      ) : null}
+                    </div>
+                    {!profile.active ? (
+                      <button
+                        disabled={activatingProfileId !== null}
+                        onClick={() => void activateProfile(profile)}
+                        type="button"
+                      >
+                        <CheckCircle2 size={14} />
+                        {activatingProfileId === profile.id ? "Activating…" : "Make active"}
+                      </button>
+                    ) : null}
+                  </article>
+                ))}
+                {profiles.data?.length === 0 ? (
+                  <div className="empty-state">No attention profiles yet</div>
+                ) : null}
+              </div>
+            </AsyncBoundary>
           </div>
+        </div>
+      </section>
+
+      <section className="panel">
+        <PanelHeader title="Drift-triggered tests" icon={<Activity size={17} />} />
+        <form className="stack schedule-form" onSubmit={saveSchedule}>
+          <div className="automation-toggle">
+            <div>
+              <strong>Automatic test generation</strong>
+              <span className="muted">
+                Evaluate new, non-baseline drift events against this policy.
+              </span>
+            </div>
+            <label className="switch">
+              <input
+                checked={scheduleEnabled}
+                onChange={(event) => setScheduleEnabled(event.target.checked)}
+                type="checkbox"
+              />
+              <span aria-hidden="true" />
+              <em>{scheduleEnabled ? "Enabled" : "Disabled"}</em>
+            </label>
+          </div>
+
+          <div className="settings-block">
+            <div className="settings-section-heading">
+              <div>
+                <h3>Generate tests when drift is at least</h3>
+                <span className="muted">
+                  A minimum level includes every more severe drift event.
+                </span>
+              </div>
+              <button
+                className={thresholdMode === "advanced" ? "active" : ""}
+                onClick={() =>
+                  setThresholdMode((current) =>
+                    current === "advanced" ? "preset" : "advanced"
+                  )
+                }
+                type="button"
+              >
+                {thresholdMode === "advanced" ? "Use presets" : "Exact range"}
+              </button>
+            </div>
+            {thresholdMode === "preset" ? (
+              <div className="threshold-grid">
+                {DRIFT_PRESETS.map((preset) => (
+                  <button
+                    className={presetScore === preset.score ? "active" : ""}
+                    key={preset.score}
+                    onClick={() => {
+                      setPresetScore(preset.score);
+                      setMinimumScore(preset.score);
+                      setMaximumScore("");
+                    }}
+                    type="button"
+                  >
+                    <strong>{preset.name}</strong>
+                    <span>{preset.description}</span>
+                    <code>score ≥ {preset.score}</code>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="advanced-range">
+                <p className="notice">
+                  This exact band differs from a minimum level: scores above the maximum will
+                  not trigger generation.
+                </p>
+                <div className="two-column">
+                  <label>
+                    <span>Minimum score (inclusive)</span>
+                    <input
+                      min="0"
+                      onChange={(event) => setMinimumScore(event.target.value)}
+                      required
+                      step="0.01"
+                      type="number"
+                      value={minimumScore}
+                    />
+                  </label>
+                  <label>
+                    <span>Maximum score (inclusive, optional)</span>
+                    <input
+                      min="0"
+                      onChange={(event) => setMaximumScore(event.target.value)}
+                      step="0.01"
+                      type="number"
+                      value={maximumScore}
+                    />
+                  </label>
+                </div>
+                {!driftRangeIsValid ? (
+                  <InlineError
+                    message="The maximum score must be greater than or equal to the minimum score."
+                  />
+                ) : null}
+              </div>
+            )}
+          </div>
+
+          <div className="settings-block">
+            <div>
+              <h3>Generation mix</h3>
+              <p className="muted settings-intro">
+                Choose categories and how many independent questions each trigger should queue.
+              </p>
+            </div>
+            <div className="generation-mix-list">
+              {PACK_TYPES.map((packType) => {
+                const selected = scheduledPackTypes.includes(packType);
+                return (
+                  <div className={`generation-mix-row ${selected ? "selected" : ""}`} key={packType}>
+                    <label className="row checkbox-label">
+                      <input
+                        checked={selected}
+                        onChange={() =>
+                          setScheduledPackTypes((current) =>
+                            current.includes(packType)
+                              ? current.filter((value) => value !== packType)
+                              : [...current, packType]
+                          )
+                        }
+                        type="checkbox"
+                      />
+                      <span>{labelize(packType)}</span>
+                    </label>
+                    <label>
+                      <span>Questions</span>
+                      <input
+                        disabled={!selected}
+                        max={maxQuestionsPerCategory}
+                        min="1"
+                        onChange={(event) =>
+                          setScheduledQuestionCounts((current) => ({
+                            ...current,
+                            [packType]: Math.min(
+                              maxQuestionsPerCategory,
+                              Math.max(
+                                1,
+                                Number(event.target.value) || defaultQuestionCount
+                              )
+                            )
+                          }))
+                        }
+                        type="number"
+                        value={
+                          scheduledQuestionCounts[packType] ?? defaultQuestionCount
+                        }
+                      />
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="generation-limit">
+              <div>
+                <strong>Overall maximum per trigger</strong>
+                <span className="muted">
+                  A durable safety cap stored with this repository policy.
+                </span>
+              </div>
+              <label>
+                <span>Maximum questions</span>
+                <input
+                  max={maxQuestionsPerJob}
+                  min="1"
+                  onChange={(event) => setMaxQuestionsPerTrigger(event.target.value)}
+                  required
+                  type="number"
+                  value={maxQuestionsPerTrigger}
+                />
+              </label>
+              <span className={generationMixIsValid ? "question-total" : "question-total bad"}>
+                {scheduledQuestionTotal} planned / {maxQuestionsPerTrigger || "—"} max
+              </span>
+            </div>
+            {!generationMixIsValid ? (
+              <InlineError
+                message={
+                  scheduledPackTypes.length === 0
+                    ? "Select at least one test category."
+                    : `The planned question count must fit inside a 1–${maxQuestionsPerJob} question trigger limit.`
+                }
+              />
+            ) : null}
+          </div>
+
           <p className="muted">
-            Only drift events created after this automation is enabled are evaluated. Baseline
-            ingestions never trigger a test.
+            Settings are copied into each triggered job, so later edits do not change work that
+            is already queued.
           </p>
           {scheduleError ? <InlineError message={scheduleError} /> : null}
           {savedSchedule ? (
@@ -1603,42 +2143,19 @@ function RepositorySettingsPage({ repositoryId }: { repositoryId: string }) {
           ) : null}
           <button
             className="primary action-button"
-            disabled={scheduleBusy || scheduledPackTypes.length === 0}
+            disabled={
+              scheduleBusy ||
+              runtime.loading ||
+              runtime.error !== null ||
+              !driftRangeIsValid ||
+              !generationMixIsValid
+            }
             type="submit"
           >
             <Settings size={15} />
-            Save automation
+            {scheduleBusy ? "Saving…" : "Save repository settings"}
           </button>
         </form>
-      </section>
-      <section className="panel">
-        <PanelHeader title="Attention profiles" icon={<Layers size={17} />} />
-        <AsyncBoundary state={profiles}>
-          <div className="card-grid">
-            {(profiles.data ?? []).map((profile: AttentionProfile) => (
-              <article className="item-card" key={profile.id}>
-                <div className="item-card-header">
-                  <strong>{profile.name}</strong>
-                  {profile.active ? <StatusPill status="active" /> : <StatusPill status="saved" />}
-                </div>
-                <dl className="compact-definitions">
-                  <dt>Default weight</dt>
-                  <dd>{String(profile.default_weight)}</dd>
-                  <dt>Focus areas</dt>
-                  <dd>{profile.focus_areas.length}</dd>
-                </dl>
-                <div className="source-list">
-                  {profile.focus_areas.map((area) => (
-                    <span className="source-pill" key={area.id}>
-                      {area.name}: {area.path_globs.join(", ")}
-                    </span>
-                  ))}
-                </div>
-              </article>
-            ))}
-            {profiles.data?.length === 0 ? <div className="empty-state">No attention profiles</div> : null}
-          </div>
-        </AsyncBoundary>
       </section>
     </div>
   );
@@ -2550,14 +3067,23 @@ function PanelSubhead({ title }: { title: string }) {
 function IconButton({
   label,
   children,
-  onClick
+  onClick,
+  disabled = false
 }: {
   label: string;
   children: ReactNode;
   onClick: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <button aria-label={label} className="icon-button" onClick={onClick} title={label}>
+    <button
+      aria-label={label}
+      className="icon-button"
+      disabled={disabled}
+      onClick={onClick}
+      title={label}
+      type="button"
+    >
       {children}
     </button>
   );

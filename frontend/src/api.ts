@@ -85,6 +85,29 @@ export const api = {
     request<DriftEvent[]>(`/repositories/${repositoryId}/drift-events`),
   listAttentionProfiles: (repositoryId: string) =>
     request<AttentionProfile[]>(`/repositories/${repositoryId}/attention-profiles`),
+  createAttentionProfile: (
+    repositoryId: string,
+    payload: {
+      name: string;
+      default_weight: string;
+      active: boolean;
+      focus_areas: Array<{
+        name: string;
+        description: string | null;
+        weight: string;
+        path_globs: string[];
+      }>;
+    }
+  ) =>
+    request<AttentionProfile>(`/repositories/${repositoryId}/attention-profiles`, {
+      method: "POST",
+      body: payload
+    }),
+  activateAttentionProfile: (repositoryId: string, profileId: string) =>
+    request<AttentionProfile>(
+      `/repositories/${repositoryId}/attention-profiles/${profileId}/activate`,
+      { method: "POST" }
+    ),
   getRepositorySchedule: (repositoryId: string) =>
     request<RepositorySchedule | null>(`/repositories/${repositoryId}/schedule`),
   updateRepositorySchedule: (
@@ -93,7 +116,8 @@ export const api = {
       enabled: boolean;
       drift_min_score: string;
       drift_max_score: string | null;
-      pack_types: string[];
+      generation_plan: Array<{ category: string; question_count: number }>;
+      max_questions_per_trigger: number;
     }
   ) =>
     request<RepositorySchedule>(`/repositories/${repositoryId}/schedule`, {

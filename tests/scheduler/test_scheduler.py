@@ -52,6 +52,46 @@ def test_schedule_request_rejects_reversed_or_duplicate_settings() -> None:
             ]
         )
 
+    with pytest.raises(ValidationError, match="cannot exceed max_questions_per_trigger"):
+        RepositoryScheduleUpdateRequest(
+            generation_plan=[
+                {"category": ContextPackType.ACTIVE_PR, "question_count": 3},
+                {
+                    "category": ContextPackType.LOW_LEVEL_COMPONENTS,
+                    "question_count": 2,
+                },
+            ],
+            max_questions_per_trigger=4,
+        )
+
+
+def test_repository_schedule_persists_the_generation_mix() -> None:
+    schedule_repo = FakeScheduleRepo()
+    service = SchedulerService(
+        repository_repo=FakeRepositoryRepo(),
+        repository_schedule_repo=schedule_repo,
+        questions_per_category_default=2,
+    )
+
+    service.update_repository_schedule(
+        repository_id=uuid4(),
+        enabled=True,
+        drift_min_score=Decimal("25"),
+        drift_max_score=None,
+        pack_types=None,
+        question_counts={
+            ContextPackType.LOW_LEVEL_COMPONENTS: 3,
+            ContextPackType.ACTIVE_PR: 2,
+        },
+        max_questions_per_trigger=6,
+    )
+
+    assert schedule_repo.updated_generation_plan == [
+        {"category": "low_level_components", "question_count": 3},
+        {"category": "active_pr", "question_count": 2},
+    ]
+    assert schedule_repo.updated_question_limit == 6
+
 
 def test_scheduler_tick_reports_evaluated_and_triggered_counts() -> None:
     schedule_repo = FakeScheduleRepo()
@@ -96,6 +136,19 @@ class FakeScheduleRepo:
         self.evaluations: list[object] = []
         self.batch_size: int | None = None
         self.questions_per_category: int | None = None
+        self.updated_generation_plan: list[dict[str, object]] | None = None
+        self.updated_question_limit: int | None = None
+
+    def upsert(
+        self,
+        *,
+        generation_plan: list[dict[str, object]],
+        max_questions_per_trigger: int,
+        **_kwargs: object,
+    ) -> object:
+        self.updated_generation_plan = generation_plan
+        self.updated_question_limit = max_questions_per_trigger
+        return SimpleNamespace()
 
     def evaluate_pending(
         self,

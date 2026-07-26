@@ -20,6 +20,10 @@ class RepositorySchedule(Base):
             "drift_max_score is null or drift_max_score >= drift_min_score",
             name="ck_repository_schedules_score_range",
         ),
+        sa.CheckConstraint(
+            "max_questions_per_trigger > 0 and max_questions_per_trigger <= 15",
+            name="ck_repository_schedules_question_limit",
+        ),
         sa.UniqueConstraint("repository_id", name="uq_repository_schedules_repository"),
         sa.Index("ix_repository_schedules_enabled", "enabled", "active_since"),
     )
@@ -42,6 +46,18 @@ class RepositorySchedule(Base):
         nullable=False,
         server_default=sa.text("'[\"low_level_components\"]'::jsonb"),
     )
+    generation_plan: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=sa.text(
+            """'[{"category": "low_level_components", "question_count": 1}]'::jsonb"""
+        ),
+    )
+    max_questions_per_trigger: Mapped[int] = mapped_column(
+        sa.Integer,
+        nullable=False,
+        server_default="15",
+    )
     active_since: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,
@@ -58,6 +74,8 @@ class RepositoryScheduleRead(OrmModel):
     drift_min_score: Decimal
     drift_max_score: Decimal | None
     pack_types: list[ContextPackType]
+    generation_plan: list[dict[str, Any]]
+    max_questions_per_trigger: int
     active_since: datetime
     created_at: datetime
     updated_at: datetime
