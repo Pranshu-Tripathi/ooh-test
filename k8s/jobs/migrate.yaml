@@ -1,0 +1,50 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-migrate
+  namespace: ooh-test
+  labels:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/instance: ooh-test
+    app.kubernetes.io/part-of: ooh-test
+    app.kubernetes.io/component: database-migration
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ooh-test
+        app.kubernetes.io/instance: ooh-test
+        app.kubernetes.io/part-of: ooh-test
+        app.kubernetes.io/component: database-migration
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: ooh-test:local
+          imagePullPolicy: Never
+          command:
+            - /bin/sh
+            - -ec
+          args:
+            - |
+              python -m ooh.migrations
+              python -m ooh.scheduler.healthcheck
+          envFrom:
+            - configMapRef:
+                name: ooh-runtime
+          env:
+            - name: OOH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ooh-database
+                  key: OOH_DATABASE_URL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

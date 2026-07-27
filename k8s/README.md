@@ -23,6 +23,7 @@ Prerequisites:
 
 - Docker Desktop is running.
 - Kubernetes is enabled in Docker Desktop.
+- Docker Desktop Kubernetes uses the `kind` provisioner.
 - `kubectl config get-contexts docker-desktop` returns the Docker Desktop context.
 - `kubectl --context docker-desktop get nodes` reports a ready node.
 
@@ -115,6 +116,43 @@ The recreated pod must return `checkpoint-3`. The probe table can then be remove
   psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
   -c "DROP TABLE phase3_persistence_probe;"
 ```
+
+## Checkpoint 4: database migrations
+
+Application images are built into Docker Desktop under the project-specific local tag
+`ooh-test:local`:
+
+```bash
+./scripts/k8s-build-image
+```
+
+The build command always names the `desktop-linux` Docker context and does not change the global
+Docker context. Docker Desktop's `kind` provisioner has a separate containerd image store, so the
+script imports the image through an ephemeral privileged helper and then removes that helper. The
+project-specific `ooh-test:local` tag is the only imported tag. Kubernetes workloads use
+`imagePullPolicy: Never`, so they can only run the imported image and cannot accidentally pull an
+unrelated registry image with the same name.
+
+Migrations run as the explicit, bounded `db-migrate` Job:
+
+```bash
+./scripts/k8s-run-migrations
+```
+
+The runner:
+
+1. waits for the Postgres StatefulSet;
+2. refuses to replace an active migration, otherwise removes only a previous `db-migrate` Job;
+3. creates a fresh Job from `k8s/jobs`;
+4. waits for successful completion and prints the migration log;
+5. returns non-zero, with Job diagnostics, if migration does not complete.
+
+This runner is the rollout gate. Application Deployments must not be applied unless it exits
+successfully. The Job runs `python -m ooh.migrations`, which upgrades to the packaged Alembic head;
+it then runs the existing scheduler health check to verify database reachability and exact schema
+head. Running it again is a supported no-op when the schema is already current. Override the
+default five-minute bound with `OOH_K8S_MIGRATION_TIMEOUT` only when a future migration is
+intentionally expected to take longer.
 
 ## Network and port contract
 

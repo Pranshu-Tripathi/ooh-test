@@ -1,0 +1,51 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(dirname "$script_dir")
+kubectl_ooh="$script_dir/kubectl-ooh-test"
+image_name="ooh-test:local"
+loader_image="alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40"
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo "docker is required" >&2
+    exit 127
+fi
+
+provider_ids=$(
+    "$kubectl_ooh" get nodes \
+        -o jsonpath='{range .items[*]}{.spec.providerID}{"\n"}{end}'
+)
+
+case "$provider_ids" in
+    *kind://docker/desktop/*) ;;
+    *)
+        echo "Docker Desktop Kubernetes must use the kind provisioner" >&2
+        exit 1
+        ;;
+esac
+
+docker --context desktop-linux build --tag "$image_name" "$repository_root"
+
+docker --context desktop-linux image save "$image_name" |
+    docker --context desktop-linux run \
+        --rm \
+        --interactive \
+        --privileged \
+        --pid=host \
+        "$loader_image" \
+        sh -ec '
+            apk add --no-cache containerd-ctr procps util-linux >/dev/null
+            containerd_pids=$(pgrep -f "^/usr/local/bin/containerd$")
+            set -- $containerd_pids
+            if [ "$#" -ne 1 ]; then
+                echo "expected one Docker Desktop kind containerd process, found $#" >&2
+                exit 1
+            fi
+            containerd_pid=$1
+            nsenter -t "$containerd_pid" -m -- \
+                ctr --address /run/containerd/containerd.sock \
+                --namespace k8s.io \
+                images import -
+        '
