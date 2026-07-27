@@ -7,4 +7,5 @@ resources:
   - configmap.yaml
   - database-secret.yaml
   - namespace.yaml
+  - postgres.yaml
   - storage.yaml

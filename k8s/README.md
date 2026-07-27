@@ -69,6 +69,53 @@ failed checkpoint.
 Deleting either PVC is destructive. Docker Desktop's local-path volumes use a `Delete` reclaim
 policy, so deleting a claim can delete its stored data.
 
+## Checkpoint 3: Postgres
+
+Postgres runs as a single-replica StatefulSet behind the namespace-internal, headless `postgres`
+Service. It mounts the existing `postgres-data` claim and receives only its three bootstrap values
+from `ooh-database`. Startup, readiness, and liveness probes use `pg_isready`.
+
+Deploy it and wait for readiness:
+
+```bash
+./scripts/kubectl-ooh-test apply -k k8s/base
+./scripts/kubectl-ooh-test rollout status statefulset/postgres --timeout=120s
+./scripts/kubectl-ooh-test get pod,service,pvc
+```
+
+The StatefulSet requests 250 millicores and 1 GiB of memory, with limits of one CPU and 2 GiB.
+These are initial measurement values from the Phase 3 handoff, not guaranteed production sizing.
+After scheduling, `postgres-data` must be `Bound`; `ooh-cache` remains `Pending` until an
+application workload mounts it.
+
+Persistence can be checked without exposing Postgres outside the cluster:
+
+```bash
+./scripts/kubectl-ooh-test exec postgres-0 -- \
+  psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
+  -c "CREATE TABLE IF NOT EXISTS phase3_persistence_probe (
+    id integer PRIMARY KEY,
+    marker text NOT NULL
+  );
+  INSERT INTO phase3_persistence_probe VALUES (1, 'checkpoint-3')
+  ON CONFLICT (id) DO UPDATE SET marker = EXCLUDED.marker;"
+
+./scripts/kubectl-ooh-test delete pod postgres-0
+./scripts/kubectl-ooh-test rollout status statefulset/postgres --timeout=120s
+
+./scripts/kubectl-ooh-test exec postgres-0 -- \
+  psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
+  -c "TABLE phase3_persistence_probe;"
+```
+
+The recreated pod must return `checkpoint-3`. The probe table can then be removed:
+
+```bash
+./scripts/kubectl-ooh-test exec postgres-0 -- \
+  psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
+  -c "DROP TABLE phase3_persistence_probe;"
+```
+
 ## Network and port contract
 
 Phase 3 starts with port-forwarding. It does not create an Ingress, NodePort, or LoadBalancer
