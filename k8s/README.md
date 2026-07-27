@@ -154,6 +154,46 @@ head. Running it again is a supported no-op when the schema is already current. 
 default five-minute bound with `OOH_K8S_MIGRATION_TIMEOUT` only when a future migration is
 intentionally expected to take longer.
 
+## Checkpoint 5: API and port-forwarded UI
+
+The API runs as a single-replica Deployment behind an internal ClusterIP Service. It mounts the
+shared `ooh-cache` claim, consumes non-secret settings from `ooh-runtime`, and receives only its
+database URL from `ooh-database`. Its startup and liveness probes use `/healthz`; readiness uses
+`/readyz`, which checks the database, exact Alembic head, and writable cache.
+
+Build/import the current application image, then deploy through the migration gate:
+
+```bash
+./scripts/k8s-build-image
+./scripts/k8s-deploy-api
+```
+
+The API is intentionally outside `k8s/base`. The deployment script must complete
+`k8s-run-migrations` successfully before it applies `k8s/apps`; a failed migration therefore cannot
+roll out a new API pod. Repeated deployments restart the API so a newly imported local image is
+used even though its project-local tag remains `ooh-test:local`.
+
+The Deployment requests 100 millicores and 256 MiB of memory, with limits of 500 millicores and
+512 MiB. After scheduling, both `postgres-data` and `ooh-cache` must be `Bound`.
+
+Start the loopback-only port-forward:
+
+```bash
+./scripts/k8s-port-forward-api
+```
+
+In a second terminal, validate API, runtime configuration, and the bundled UI:
+
+```bash
+curl http://localhost:8500/healthz
+curl http://localhost:8500/readyz
+curl http://localhost:8500/runtime
+open http://localhost:8500/
+```
+
+The wrapper fixes both sides of the forward at port `8500` and binds only `127.0.0.1`. It does not
+create an Ingress, NodePort, LoadBalancer, or non-loopback listener.
+
 ## Network and port contract
 
 Phase 3 starts with port-forwarding. It does not create an Ingress, NodePort, or LoadBalancer

@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(dirname "$script_dir")
+kubectl_ooh="$script_dir/kubectl-ooh-test"
+rollout_timeout="${OOH_K8S_ROLLOUT_TIMEOUT:-300s}"
+
+"$script_dir/k8s-run-migrations"
+"$kubectl_ooh" apply -k "$repository_root/k8s/apps"
+"$kubectl_ooh" rollout restart deployment/api
+
+if ! "$kubectl_ooh" rollout status deployment/api --timeout="$rollout_timeout"
+then
+    "$kubectl_ooh" describe deployment/api >&2 || true
+    "$kubectl_ooh" get pods \
+        -l app.kubernetes.io/component=api \
+        -o wide >&2 || true
+    "$kubectl_ooh" logs deployment/api \
+        --all-pods=true \
+        --tail=100 >&2 || true
+    exit 1
+fi

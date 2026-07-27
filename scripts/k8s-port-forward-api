@@ -1,0 +1,10 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+
+exec "$script_dir/kubectl-ooh-test" port-forward \
+    --address 127.0.0.1 \
+    service/api \
+    8500:8500

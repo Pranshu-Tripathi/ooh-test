@@ -1,0 +1,112 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: ooh-test
+  labels:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/instance: ooh-test
+    app.kubernetes.io/part-of: ooh-test
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/instance: ooh-test
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: 8500
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: ooh-test
+  labels:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/instance: ooh-test
+    app.kubernetes.io/part-of: ooh-test
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  progressDeadlineSeconds: 120
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ooh-test
+      app.kubernetes.io/instance: ooh-test
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ooh-test
+        app.kubernetes.io/instance: ooh-test
+        app.kubernetes.io/part-of: ooh-test
+        app.kubernetes.io/component: api
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: ooh-test:local
+          imagePullPolicy: Never
+          command:
+            - python
+            - -m
+            - ooh.api.main
+          envFrom:
+            - configMapRef:
+                name: ooh-runtime
+          env:
+            - name: OOH_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ooh-database
+                  key: OOH_DATABASE_URL
+          ports:
+            - name: http
+              containerPort: 8500
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          volumeMounts:
+            - name: ooh-cache
+              mountPath: /ooh_cache
+      volumes:
+        - name: ooh-cache
+          persistentVolumeClaim:
+            claimName: ooh-cache
