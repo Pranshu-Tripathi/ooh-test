@@ -194,6 +194,53 @@ open http://localhost:8500/
 The wrapper fixes both sides of the forward at port `8500` and binds only `127.0.0.1`. It does not
 create an Ingress, NodePort, LoadBalancer, or non-loopback listener.
 
+## Checkpoint 6: role-specific workers
+
+The durable Postgres job queue is consumed by three single-replica Deployments:
+
+| Deployment | `OOH_WORKER_JOB_TYPES` | Initial resources |
+| --- | --- | --- |
+| `worker-ingestion` | `ingest_repository` | 250m/512Mi requested; 1 CPU/1Gi limited |
+| `worker-generation` | `generate_test` | 100m/256Mi requested; 500m/512Mi limited |
+| `worker-judging` | `judge_answer` | 100m/256Mi requested; 500m/512Mi limited |
+
+There is intentionally no `compute_drift` worker. Drift calculation remains part of
+`ingest_repository`, preserving the Phase 2 ownership contract.
+
+Build/import the current application image, then deploy all three roles through the migration gate:
+
+```bash
+./scripts/k8s-build-image
+./scripts/k8s-deploy-workers
+```
+
+Each worker consumes shared settings from `ooh-runtime`, receives the database URL from
+`ooh-database`, and mounts `ooh-cache` at `/ooh_cache`. Startup and readiness probes run
+`python -m ooh.worker.healthcheck`, which verifies database connectivity, exact Alembic head, and a
+writable cache. Kubernetes already restarts a worker whose main process exits; a dependency-based
+liveness probe is deliberately omitted so a temporary database outage does not create a restart
+loop.
+
+The Deployments use `Recreate`, and the deployment script restarts each pre-existing fixed
+local-image tag serially. Newly created Deployments are not restarted, avoiding a race before the
+worker installs its graceful-shutdown handler. This prevents old and new pods for the same role
+from overlapping during rollout, particularly for ingestion's mutable per-repository checkout.
+Each pod receives 660 seconds of termination grace so bounded model operations can finish and
+persist their durable job outcome; the Deployment progress deadline allows for that grace period.
+
+Inspect the role filters and readiness:
+
+```bash
+./scripts/kubectl-ooh-test get deployments,pods \
+  -l app.kubernetes.io/part-of=ooh-test
+./scripts/kubectl-ooh-test logs deployment/worker-ingestion --tail=20
+./scripts/kubectl-ooh-test logs deployment/worker-generation --tail=20
+./scripts/kubectl-ooh-test logs deployment/worker-judging --tail=20
+```
+
+Workers do not accept inbound traffic, so this checkpoint creates no Service, port-forward, or host
+port. The scheduler remains a separate Deployment for checkpoint 7.
+
 ## Network and port contract
 
 Phase 3 starts with port-forwarding. It does not create an Ingress, NodePort, or LoadBalancer
