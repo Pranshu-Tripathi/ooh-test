@@ -3,7 +3,7 @@
 set -eu
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-repository_root=$(dirname "$script_dir")
+repository_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
 kubectl_ooh="$script_dir/kubectl-ooh-test"
 image_name="ooh-test:local"
 loader_image="alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40"

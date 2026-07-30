@@ -1,0 +1,37 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+internal_dir=$(CDPATH= cd -- "$script_dir/../internals" && pwd)
+kubectl_ooh="$internal_dir/kubectl-ooh-test"
+shutdown_timeout="${OOH_K8S_SHUTDOWN_TIMEOUT:-720s}"
+deployments="api worker-ingestion worker-generation worker-judging scheduler"
+pod_selector='app.kubernetes.io/component in (api,database,scheduler,worker-ingestion,worker-generation,worker-judging)'
+
+"$internal_dir/port-forward-api" stop
+
+for deployment in $deployments
+do
+    if "$kubectl_ooh" get "deployment/$deployment" >/dev/null 2>&1; then
+        "$kubectl_ooh" scale "deployment/$deployment" --replicas=0
+    fi
+done
+
+if "$kubectl_ooh" get statefulset/postgres >/dev/null 2>&1; then
+    "$kubectl_ooh" scale statefulset/postgres --replicas=0
+fi
+
+remaining_pods=$(
+    "$kubectl_ooh" get pods \
+        -l "$pod_selector" \
+        -o name
+)
+if [ -n "$remaining_pods" ]; then
+    "$kubectl_ooh" wait \
+        --for=delete pod \
+        -l "$pod_selector" \
+        --timeout="$shutdown_timeout"
+fi
+
+echo "ooh-test is down; namespace and persistent data were preserved"

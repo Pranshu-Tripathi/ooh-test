@@ -2,6 +2,7 @@
 
 set -eu
 
+# These are per-command flags; this wrapper never changes the global kubectl context.
 context="docker-desktop"
 namespace="ooh-test"
 

@@ -1,0 +1,52 @@
+#!/bin/sh
+
+set -u
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+internal_dir=$(CDPATH= cd -- "$script_dir/../internals" && pwd)
+kubectl_ooh="$internal_dir/kubectl-ooh-test"
+system_ready=true
+
+"$kubectl_ooh" get \
+    deployments,statefulsets,pods,services,persistentvolumeclaims,jobs \
+    -o wide
+
+for deployment in api worker-ingestion worker-generation worker-judging scheduler
+do
+    ready_replicas=$(
+        "$kubectl_ooh" get "deployment/$deployment" \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null
+    )
+    if [ "${ready_replicas:-0}" != "1" ]; then
+        system_ready=false
+    fi
+done
+
+postgres_ready=$(
+    "$kubectl_ooh" get statefulset/postgres \
+        -o jsonpath='{.status.readyReplicas}' 2>/dev/null
+)
+if [ "${postgres_ready:-0}" != "1" ]; then
+    system_ready=false
+fi
+
+if "$internal_dir/port-forward-api" status; then
+    if curl --fail --silent --show-error \
+        http://127.0.0.1:8500/readyz >/dev/null 2>&1
+    then
+        echo "API readiness through port-forward: ready"
+    else
+        echo "API readiness through port-forward: failed"
+        system_ready=false
+    fi
+else
+    system_ready=false
+fi
+
+if [ "$system_ready" = true ]; then
+    echo "ooh-test status: up"
+    exit 0
+fi
+
+echo "ooh-test status: down or degraded"
+exit 1

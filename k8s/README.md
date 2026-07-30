@@ -6,16 +6,37 @@ other projects by two fixed boundaries:
 - kubectl context: `docker-desktop`
 - Kubernetes namespace: `ooh-test`
 
-The repository does not change the global kubectl context or its default namespace. Use the
-project wrapper for every cluster command:
+The repository does not change the global kubectl context or its default namespace. The supported
+user lifecycle is:
 
 ```bash
-./scripts/kubectl-ooh-test get pods
+./scripts/k8s/client/up
+./scripts/k8s/client/status
+./scripts/k8s/client/down
 ```
 
-The wrapper always supplies `--context docker-desktop --namespace ooh-test` and refuses
-`kubectl config` commands. This is important on machines whose active context points at another
-cluster.
+`up` builds and imports the local image, reconciles the isolated namespace, runs migrations once,
+deploys every application process, and starts a managed loopback-only API port-forward on host port
+8500. Set `OOH_K8S_SKIP_BUILD=1` only when the current `ooh-test:local` image is already imported.
+`down` stops that managed forward and scales workloads to zero while preserving the namespace,
+Secrets, ConfigMap, Services, PVCs, and their data. `status` prints the complete project resource
+table, checks every expected replica, and validates API readiness through the managed forward; it
+returns non-zero when the system is down or degraded.
+
+On macOS, the forward is held by the project-scoped launch job
+`dev.ooh-test.k8s-port-forward`. It invokes kubectl with fixed `docker-desktop`, `ooh-test`,
+`127.0.0.1`, and `8500` arguments, writes only temporary logs, and is removed by `down`; it does not
+install a persistent LaunchAgent or change the global kubectl context.
+
+Implementation commands live under `scripts/k8s/internals` and are intended for development,
+checkpoint validation, and diagnostics. The internal kubectl wrapper always supplies
+`--context docker-desktop --namespace ooh-test` and refuses `kubectl config` commands. For example:
+
+```bash
+./scripts/k8s/internals/kubectl-ooh-test get pods -o wide
+```
+
+This is important on machines whose active context points at another cluster.
 
 ## Provider and isolation
 
@@ -30,8 +51,8 @@ Prerequisites:
 Create or reconcile the project namespace:
 
 ```bash
-./scripts/kubectl-ooh-test apply -k k8s/base
-./scripts/kubectl-ooh-test get namespace ooh-test
+./scripts/k8s/internals/kubectl-ooh-test apply -k k8s/base
+./scripts/k8s/internals/kubectl-ooh-test get namespace ooh-test
 ```
 
 Compose remains usable throughout the rollout.
@@ -49,8 +70,8 @@ The base currently creates:
 Apply and inspect the checkpoint:
 
 ```bash
-./scripts/kubectl-ooh-test apply -k k8s/base
-./scripts/kubectl-ooh-test get configmap,secret,pvc
+./scripts/k8s/internals/kubectl-ooh-test apply -k k8s/base
+./scripts/k8s/internals/kubectl-ooh-test get configmap,secret,pvc
 ```
 
 The committed database password is intentionally a non-sensitive development credential, like the
@@ -79,9 +100,9 @@ from `ooh-database`. Startup, readiness, and liveness probes use `pg_isready`.
 Deploy it and wait for readiness:
 
 ```bash
-./scripts/kubectl-ooh-test apply -k k8s/base
-./scripts/kubectl-ooh-test rollout status statefulset/postgres --timeout=120s
-./scripts/kubectl-ooh-test get pod,service,pvc
+./scripts/k8s/internals/kubectl-ooh-test apply -k k8s/base
+./scripts/k8s/internals/kubectl-ooh-test rollout status statefulset/postgres --timeout=120s
+./scripts/k8s/internals/kubectl-ooh-test get pod,service,pvc
 ```
 
 The StatefulSet requests 250 millicores and 1 GiB of memory, with limits of one CPU and 2 GiB.
@@ -92,7 +113,7 @@ application workload mounts it.
 Persistence can be checked without exposing Postgres outside the cluster:
 
 ```bash
-./scripts/kubectl-ooh-test exec postgres-0 -- \
+./scripts/k8s/internals/kubectl-ooh-test exec postgres-0 -- \
   psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
   -c "CREATE TABLE IF NOT EXISTS phase3_persistence_probe (
     id integer PRIMARY KEY,
@@ -101,10 +122,10 @@ Persistence can be checked without exposing Postgres outside the cluster:
   INSERT INTO phase3_persistence_probe VALUES (1, 'checkpoint-3')
   ON CONFLICT (id) DO UPDATE SET marker = EXCLUDED.marker;"
 
-./scripts/kubectl-ooh-test delete pod postgres-0
-./scripts/kubectl-ooh-test rollout status statefulset/postgres --timeout=120s
+./scripts/k8s/internals/kubectl-ooh-test delete pod postgres-0
+./scripts/k8s/internals/kubectl-ooh-test rollout status statefulset/postgres --timeout=120s
 
-./scripts/kubectl-ooh-test exec postgres-0 -- \
+./scripts/k8s/internals/kubectl-ooh-test exec postgres-0 -- \
   psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
   -c "TABLE phase3_persistence_probe;"
 ```
@@ -112,7 +133,7 @@ Persistence can be checked without exposing Postgres outside the cluster:
 The recreated pod must return `checkpoint-3`. The probe table can then be removed:
 
 ```bash
-./scripts/kubectl-ooh-test exec postgres-0 -- \
+./scripts/k8s/internals/kubectl-ooh-test exec postgres-0 -- \
   psql -v ON_ERROR_STOP=1 -U ooh -d ooh \
   -c "DROP TABLE phase3_persistence_probe;"
 ```
@@ -123,7 +144,7 @@ Application images are built into Docker Desktop under the project-specific loca
 `ooh-test:local`:
 
 ```bash
-./scripts/k8s-build-image
+./scripts/k8s/internals/build-image
 ```
 
 The build command always names the `desktop-linux` Docker context and does not change the global
@@ -136,7 +157,7 @@ unrelated registry image with the same name.
 Migrations run as the explicit, bounded `db-migrate` Job:
 
 ```bash
-./scripts/k8s-run-migrations
+./scripts/k8s/internals/run-migrations
 ```
 
 The runner:
@@ -164,12 +185,12 @@ database URL from `ooh-database`. Its startup and liveness probes use `/healthz`
 Build/import the current application image, then deploy through the migration gate:
 
 ```bash
-./scripts/k8s-build-image
-./scripts/k8s-deploy-api
+./scripts/k8s/internals/build-image
+./scripts/k8s/internals/deploy-api
 ```
 
 The API is intentionally outside `k8s/base`. The deployment script must complete
-`k8s-run-migrations` successfully before it applies `k8s/apps`; a failed migration therefore cannot
+`run-migrations` successfully before it applies `k8s/apps`; a failed migration therefore cannot
 roll out a new API pod. Repeated deployments restart the API so a newly imported local image is
 used even though its project-local tag remains `ooh-test:local`.
 
@@ -179,7 +200,7 @@ The Deployment requests 100 millicores and 256 MiB of memory, with limits of 500
 Start the loopback-only port-forward:
 
 ```bash
-./scripts/k8s-port-forward-api
+./scripts/k8s/internals/port-forward-api
 ```
 
 In a second terminal, validate API, runtime configuration, and the bundled UI:
@@ -210,8 +231,8 @@ There is intentionally no `compute_drift` worker. Drift calculation remains part
 Build/import the current application image, then deploy all three roles through the migration gate:
 
 ```bash
-./scripts/k8s-build-image
-./scripts/k8s-deploy-workers
+./scripts/k8s/internals/build-image
+./scripts/k8s/internals/deploy-workers
 ```
 
 Each worker consumes shared settings from `ooh-runtime`, receives the database URL from
@@ -231,15 +252,44 @@ persist their durable job outcome; the Deployment progress deadline allows for t
 Inspect the role filters and readiness:
 
 ```bash
-./scripts/kubectl-ooh-test get deployments,pods \
+./scripts/k8s/internals/kubectl-ooh-test get deployments,pods \
   -l app.kubernetes.io/part-of=ooh-test
-./scripts/kubectl-ooh-test logs deployment/worker-ingestion --tail=20
-./scripts/kubectl-ooh-test logs deployment/worker-generation --tail=20
-./scripts/kubectl-ooh-test logs deployment/worker-judging --tail=20
+./scripts/k8s/internals/kubectl-ooh-test logs deployment/worker-ingestion --tail=20
+./scripts/k8s/internals/kubectl-ooh-test logs deployment/worker-generation --tail=20
+./scripts/k8s/internals/kubectl-ooh-test logs deployment/worker-judging --tail=20
 ```
 
 Workers do not accept inbound traffic, so this checkpoint creates no Service, port-forward, or host
 port. The scheduler remains a separate Deployment for checkpoint 7.
+
+## Checkpoint 7: scheduler
+
+The scheduler runs continuously as a single-replica `scheduler` Deployment using
+`python -m ooh.scheduler.main`. It consumes polling intervals and batch size from `ooh-runtime` and
+receives its database URL from `ooh-database`. It does not need the shared cache or an inbound
+Service.
+
+Deploy it independently through the migration gate when debugging the checkpoint:
+
+```bash
+./scripts/k8s/internals/deploy-scheduler
+```
+
+Startup and readiness probes run `python -m ooh.scheduler.healthcheck`, verifying database
+connectivity and exact Alembic head. A dependency-based liveness probe is omitted so a temporary
+database outage makes the scheduler unready without causing a restart loop. The Deployment uses
+`Recreate` so two scheduler instances never poll repositories concurrently during a rollout.
+
+The initial resource request is 50 millicores and 128 MiB of memory, with limits of 250 millicores
+and 256 MiB. Verify the accepted five-second scheduler tick and 30-second repository polling
+heartbeat through INFO logs:
+
+```bash
+./scripts/k8s/internals/kubectl-ooh-test logs deployment/scheduler --tail=50
+```
+
+The scheduler is a Kubernetes Deployment, not a Kubernetes Service: it consumes database state and
+accepts no inbound network traffic. A CronJob must not run beside it.
 
 ## Network and port contract
 
@@ -255,13 +305,13 @@ Service.
 Once the API Service exists, access it with:
 
 ```bash
-./scripts/kubectl-ooh-test port-forward service/api 8500:8500
+./scripts/k8s/internals/kubectl-ooh-test port-forward service/api 8500:8500
 ```
 
 If direct database access is temporarily needed:
 
 ```bash
-./scripts/kubectl-ooh-test port-forward service/postgres 8501:5432
+./scripts/k8s/internals/kubectl-ooh-test port-forward service/postgres 8501:5432
 ```
 
 No Kubernetes workflow in this repository may bind a host port outside `8500`–`8510`. Service

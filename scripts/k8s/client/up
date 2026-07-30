@@ -1,0 +1,24 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+internal_dir=$(CDPATH= cd -- "$script_dir/../internals" && pwd)
+repository_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
+kubectl_ooh="$internal_dir/kubectl-ooh-test"
+startup_timeout="${OOH_K8S_STARTUP_TIMEOUT:-300s}"
+
+if [ "${OOH_K8S_SKIP_BUILD:-0}" != "1" ]; then
+    "$internal_dir/build-image"
+fi
+
+"$kubectl_ooh" apply -k "$repository_root/k8s/base"
+"$kubectl_ooh" rollout status statefulset/postgres --timeout="$startup_timeout"
+
+"$internal_dir/run-migrations"
+"$internal_dir/deploy-api" --migrations-complete
+"$internal_dir/deploy-workers" --migrations-complete
+"$internal_dir/deploy-scheduler" --migrations-complete
+"$internal_dir/port-forward-api" start
+
+echo "ooh-test is up at http://127.0.0.1:8500"
