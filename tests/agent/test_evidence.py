@@ -26,6 +26,30 @@ def test_collect_available_evidence_refs_from_context_pack_sources() -> None:
     assert refs["drift_event:drift-1"]["source_type"] == "drift"
 
 
+def test_collect_available_evidence_refs_from_tool_inspection() -> None:
+    refs = collect_available_evidence_refs(
+        {
+            "tool_inspection": {
+                "tool_calls": [
+                    {
+                        "tool_name": "repo.read_symbol",
+                        "evidence_refs": [
+                            {
+                                "source_type": "code",
+                                "source_uri": "code:src/app.py",
+                                "content_hash": "tool-code-hash",
+                                "metadata": {"start_line": 5, "end_line": 6},
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert refs["code:src/app.py"]["content_hash"] == "tool-code-hash"
+
+
 def test_verify_generated_test_evidence_enriches_refs() -> None:
     result = verify_generated_test_evidence(
         {

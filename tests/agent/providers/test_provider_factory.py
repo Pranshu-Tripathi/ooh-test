@@ -6,10 +6,15 @@ from ooh.config import Settings
 
 def test_build_model_provider_supports_ollama() -> None:
     provider = build_model_provider(
-        Settings(model_provider="ollama", ollama_base_url="http://ollama.local")
+        Settings(
+            model_provider="ollama",
+            ollama_base_url="http://ollama.local",
+            model_timeout_seconds=321,
+        )
     )
 
     assert isinstance(provider, OllamaModelProvider)
+    assert provider.timeout_seconds == 321
 
 
 def test_build_model_provider_rejects_unknown_provider() -> None:

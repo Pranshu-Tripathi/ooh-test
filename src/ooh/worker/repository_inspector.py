@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ooh.db.models import GuidanceSourceType, RepositoryRead, RepositorySourceType
+from ooh.worker.structural_index import STRUCTURAL_INDEX_SCHEMA_VERSION, StructuralIndexer
 
 ALWAYS_IGNORED_DIR_NAMES = {
     ".git",
@@ -78,6 +79,7 @@ class LocalRepositorySnapshot:
 class LocalRepositoryInspector:
     def __init__(self, *, cache_root: Path) -> None:
         self.cache_root = cache_root
+        self.structural_indexer = StructuralIndexer()
 
     def inspect(self, repository: RepositoryRead) -> LocalRepositorySnapshot:
         if repository.source_type != RepositorySourceType.LOCAL_PATH:
@@ -175,9 +177,37 @@ class LocalRepositoryInspector:
         snapshot_dir = self.cache_root / "repositories" / str(repository.id) / "snapshots" / commit_sha
         snapshot_dir.mkdir(parents=True, exist_ok=True)
         snapshot_path = snapshot_dir / "snapshot.json"
+        structural_index = self.structural_indexer.index(repository_path, files)
+        files_artifact = self._write_json(
+            snapshot_dir / "files.json",
+            {
+                "schema_version": STRUCTURAL_INDEX_SCHEMA_VERSION,
+                "repository_id": str(repository.id),
+                "commit_sha": commit_sha,
+                "files": [file.to_dict() for file in structural_index.files],
+            },
+        )
+        symbols_artifact = self._write_json(
+            snapshot_dir / "symbols.json",
+            {
+                "schema_version": STRUCTURAL_INDEX_SCHEMA_VERSION,
+                "repository_id": str(repository.id),
+                "commit_sha": commit_sha,
+                "symbols": [symbol.to_dict() for symbol in structural_index.symbols],
+            },
+        )
+        imports_artifact = self._write_json(
+            snapshot_dir / "imports.json",
+            {
+                "schema_version": STRUCTURAL_INDEX_SCHEMA_VERSION,
+                "repository_id": str(repository.id),
+                "commit_sha": commit_sha,
+                "imports": [import_.to_dict() for import_ in structural_index.imports],
+            },
+        )
 
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "repository_id": str(repository.id),
             "repository_name": repository.name,
             "source_type": repository.source_type.value,
@@ -188,9 +218,31 @@ class LocalRepositoryInspector:
             "file_count": len(files),
             "total_bytes": sum(file.size_bytes for file in files),
             "files": [
-                {"path": file.path, "size_bytes": file.size_bytes, "sha256": file.sha256}
-                for file in files
+                indexed_file.to_dict()
+                for indexed_file in structural_index.files
             ],
+            "index": {
+                "schema_version": STRUCTURAL_INDEX_SCHEMA_VERSION,
+                "kind": "tree_sitter_structural_index",
+                "parser": {
+                    "name": "tree-sitter",
+                    "languages": [
+                        {
+                            "language": "python",
+                            "grammar_package": "tree-sitter-python",
+                        }
+                    ],
+                },
+                "supported_languages": ["python"],
+                "indexed_file_count": structural_index.indexed_file_count,
+                "symbol_count": len(structural_index.symbols),
+                "import_count": len(structural_index.imports),
+                "artifacts": {
+                    "files": files_artifact,
+                    "symbols": symbols_artifact,
+                    "imports": imports_artifact,
+                },
+            },
             "guidance_sources": [
                 {
                     "source_type": guidance.source_type.value,
@@ -200,7 +252,7 @@ class LocalRepositoryInspector:
                 for guidance in guidance_sources
             ],
         }
-        snapshot_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        self._write_json(snapshot_path, payload)
         return str(snapshot_path)
 
     @staticmethod
@@ -316,3 +368,11 @@ class LocalRepositoryInspector:
             for chunk in iter(lambda: file.read(1024 * 1024), b""):
                 digest.update(chunk)
         return digest.hexdigest()
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict[str, object]) -> dict[str, str]:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        return {
+            "uri": str(path),
+            "sha256": LocalRepositoryInspector._sha256(path),
+        }

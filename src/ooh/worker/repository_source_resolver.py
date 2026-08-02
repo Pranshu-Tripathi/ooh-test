@@ -14,21 +14,59 @@ class RepositorySourceResolver:
     def __init__(self, *, cache_root: Path) -> None:
         self.cache_root = cache_root
 
-    def resolve(self, repository: RepositoryRead) -> ResolvedRepositorySource:
+    def resolve(
+        self,
+        repository: RepositoryRead,
+        *,
+        target_commit_sha: str | None = None,
+    ) -> ResolvedRepositorySource:
         match repository.source_type:
             case RepositorySourceType.LOCAL_PATH:
-                return self._resolve_local_path(repository)
+                return self._resolve_local_path(
+                    repository,
+                    target_commit_sha=target_commit_sha,
+                )
             case RepositorySourceType.GITHUB:
-                return self._resolve_github(repository)
+                return self._resolve_github(
+                    repository,
+                    target_commit_sha=target_commit_sha,
+                )
 
         raise ValueError(f"unsupported repository source type: {repository.source_type.value}")
 
-    def _resolve_local_path(self, repository: RepositoryRead) -> ResolvedRepositorySource:
-        return ResolvedRepositorySource(path=Path(repository.source_uri).expanduser().resolve())
+    def _resolve_local_path(
+        self,
+        repository: RepositoryRead,
+        *,
+        target_commit_sha: str | None,
+    ) -> ResolvedRepositorySource:
+        source_path = Path(repository.source_uri).expanduser().resolve()
+        target_commit_sha = target_commit_sha or self._run(
+            ["git", "-C", str(source_path), "rev-parse", "HEAD"]
+        ).strip()
+        if not target_commit_sha:
+            raise RuntimeError("local repository HEAD did not resolve to a commit")
+        return self._resolve_exact_checkout(
+            repository,
+            source_uri=str(source_path),
+            target_commit_sha=target_commit_sha,
+        )
 
-    def _resolve_github(self, repository: RepositoryRead) -> ResolvedRepositorySource:
+    def _resolve_github(
+        self,
+        repository: RepositoryRead,
+        *,
+        target_commit_sha: str | None,
+    ) -> ResolvedRepositorySource:
         if repository.token_ref is not None:
             raise ValueError("github token_ref is not wired to a secret provider yet")
+
+        if target_commit_sha is not None:
+            return self._resolve_exact_checkout(
+                repository,
+                source_uri=repository.source_uri,
+                target_commit_sha=target_commit_sha,
+            )
 
         checkout_path = self.cache_root / "repositories" / str(repository.id) / "checkout"
         if self._is_git_checkout(checkout_path):
@@ -40,6 +78,47 @@ class RepositorySourceResolver:
 
         checkout_path.parent.mkdir(parents=True, exist_ok=True)
         self._clone(repository, checkout_path)
+        return ResolvedRepositorySource(path=checkout_path)
+
+    def _resolve_exact_checkout(
+        self,
+        repository: RepositoryRead,
+        *,
+        source_uri: str,
+        target_commit_sha: str,
+    ) -> ResolvedRepositorySource:
+        checkout_path = self.cache_root / "repositories" / str(repository.id) / "checkout"
+        if self._is_git_checkout(checkout_path):
+            self._run(
+                [
+                    "git",
+                    "-C",
+                    str(checkout_path),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    source_uri,
+                ]
+            )
+            self._run(["git", "-C", str(checkout_path), "fetch", "--prune", "origin"])
+        else:
+            if checkout_path.exists() and any(checkout_path.iterdir()):
+                raise ValueError(
+                    f"cached checkout path exists but is not a git repository: {checkout_path}"
+                )
+            checkout_path.parent.mkdir(parents=True, exist_ok=True)
+            self._run(["git", "clone", "--no-checkout", source_uri, str(checkout_path)])
+
+        self._run(
+            [
+                "git",
+                "-C",
+                str(checkout_path),
+                "checkout",
+                "--detach",
+                target_commit_sha,
+            ]
+        )
         return ResolvedRepositorySource(path=checkout_path)
 
     def _clone(self, repository: RepositoryRead, checkout_path: Path) -> None:
@@ -67,9 +146,10 @@ class RepositorySourceResolver:
         return (path / ".git").exists()
 
     @staticmethod
-    def _run(command: list[str]) -> None:
+    def _run(command: list[str]) -> str:
         try:
-            subprocess.run(command, check=True, capture_output=True, text=True)
+            completed = subprocess.run(command, check=True, capture_output=True, text=True)
+            return completed.stdout
         except FileNotFoundError as exc:
             raise RuntimeError("git executable is not available") from exc
         except subprocess.CalledProcessError as exc:

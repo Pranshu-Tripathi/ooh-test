@@ -18,7 +18,11 @@ class Job(Base):
             "status in ('queued', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled')",
             name="ck_jobs_status",
         ),
+        sa.CheckConstraint("attempt_count >= 0", name="ck_jobs_attempt_count_non_negative"),
+        sa.CheckConstraint("max_attempts > 0", name="ck_jobs_max_attempts_positive"),
+        sa.UniqueConstraint("idempotency_key", name="uq_jobs_idempotency_key"),
         sa.Index("ix_jobs_claimable", "status", "run_after", "created_at"),
+        sa.Index("ix_jobs_lease_expiry", "status", "lease_expires_at"),
         sa.Index("ix_jobs_repository", "repository_id"),
     )
 
@@ -32,6 +36,11 @@ class Job(Base):
     attempt_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="0")
     max_attempts: Mapped[int] = mapped_column(sa.Integer, nullable=False, server_default="3")
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, server_default=sa.text("'{}'::jsonb"))
+    result_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default=sa.text("'{}'::jsonb"),
+    )
     run_after: Mapped[datetime] = mapped_column(
         sa.DateTime(timezone=True),
         nullable=False,
@@ -39,6 +48,8 @@ class Job(Base):
     )
     locked_by: Mapped[str | None] = mapped_column(sa.Text)
     locked_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    lease_expires_at: Mapped[datetime | None] = mapped_column(sa.DateTime(timezone=True))
+    idempotency_key: Mapped[str | None] = mapped_column(sa.Text)
     error_summary: Mapped[str | None] = mapped_column(sa.Text)
     created_at: Mapped[datetime] = created_at_column()
     updated_at: Mapped[datetime] = updated_at_column()
@@ -52,9 +63,12 @@ class JobRead(OrmModel):
     attempt_count: int
     max_attempts: int
     payload: dict[str, Any]
+    result_metadata: dict[str, Any]
     run_after: datetime
     locked_by: str | None
     locked_at: datetime | None
+    lease_expires_at: datetime | None = None
+    idempotency_key: str | None = None
     error_summary: str | None
     created_at: datetime
     updated_at: datetime

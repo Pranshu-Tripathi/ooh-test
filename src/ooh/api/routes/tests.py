@@ -1,7 +1,8 @@
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, status
 
+from ooh.api.errors import raise_http_for_service_error
 from ooh.api.schemas.tests import (
     JobResponse,
     SavedLearningResponse,
@@ -10,27 +11,15 @@ from ooh.api.schemas.tests import (
     TestAnswerSubmitRequest,
     TestResultResponse,
 )
-from ooh.config import get_settings
-from ooh.db import get_database
-from ooh.db.models import JobType
-from ooh.db.repos import (
-    GeneratedTestRepo,
-    JobRepo,
-    RepositoryRepo,
-    SavedLearningRepo,
-    TestAnswerInput,
-    TestAnswerRepo,
-    TestResultRepo,
+from ooh.services import (
+    ServiceError,
+    build_answer_judging_service,
+    build_learning_service,
 )
 
 router = APIRouter(tags=["tests"])
-settings = get_settings()
-generated_test_repo = GeneratedTestRepo(get_database())
-test_answer_repo = TestAnswerRepo(get_database())
-test_result_repo = TestResultRepo(get_database())
-saved_learning_repo = SavedLearningRepo(get_database())
-repository_repo = RepositoryRepo(get_database())
-job_repo = JobRepo(get_database())
+answer_judging_service = build_answer_judging_service()
+learning_service = build_learning_service()
 
 
 @router.post(
@@ -42,28 +31,16 @@ def submit_test_answer(
     generated_test_id: UUID,
     request: TestAnswerSubmitRequest,
 ) -> TestAnswerSubmissionResponse:
-    generated_test = generated_test_repo.get(generated_test_id)
-    if generated_test is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="generated test not found")
-
-    answer = test_answer_repo.create(
-        TestAnswerInput(
+    try:
+        submission = answer_judging_service.submit_answer(
             generated_test_id=generated_test_id,
-            answer_payload=request.to_payload(),
+            answer_payload=request.model_dump(mode="json"),
         )
-    )
-    judge_job = job_repo.enqueue(
-        repository_id=generated_test.repository_id,
-        job_type=JobType.JUDGE_ANSWER,
-        payload={
-            "generated_test_id": str(generated_test_id),
-            "test_answer_id": str(answer.id),
-            "model": settings.answer_judge_model,
-        },
-    )
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
     return TestAnswerSubmissionResponse(
-        answer=TestAnswerResponse.from_record(answer),
-        judge_job=JobResponse.from_record(judge_job),
+        answer=TestAnswerResponse.from_record(submission.answer),
+        judge_job=JobResponse.from_record(submission.judge_job),
     )
 
 
@@ -72,11 +49,10 @@ def submit_test_answer(
     response_model=list[TestAnswerResponse],
 )
 def list_test_answers(generated_test_id: UUID) -> list[TestAnswerResponse]:
-    generated_test = generated_test_repo.get(generated_test_id)
-    if generated_test is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="generated test not found")
-
-    answers = test_answer_repo.list_for_generated_test(generated_test_id)
+    try:
+        answers = answer_judging_service.list_answers(generated_test_id)
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
     return [TestAnswerResponse.from_record(answer) for answer in answers]
 
 
@@ -85,12 +61,19 @@ def list_test_answers(generated_test_id: UUID) -> list[TestAnswerResponse]:
     response_model=list[TestResultResponse],
 )
 def list_test_results(generated_test_id: UUID) -> list[TestResultResponse]:
-    generated_test = generated_test_repo.get(generated_test_id)
-    if generated_test is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="generated test not found")
-
-    results = test_result_repo.list_for_generated_test(generated_test_id)
-    return [TestResultResponse.from_record(result) for result in results]
+    try:
+        results = answer_judging_service.list_results(generated_test_id)
+        grading_guidance = (
+            answer_judging_service.get_grading_guidance(generated_test_id)
+            if results
+            else None
+        )
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
+    return [
+        TestResultResponse.from_record(result, grading_guidance=grading_guidance)
+        for result in results
+    ]
 
 
 @router.get(
@@ -98,11 +81,10 @@ def list_test_results(generated_test_id: UUID) -> list[TestResultResponse]:
     response_model=list[TestResultResponse],
 )
 def list_repository_test_results(repository_id: UUID) -> list[TestResultResponse]:
-    repository = repository_repo.get(repository_id)
-    if repository is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
-
-    results = test_result_repo.list_for_repository(repository_id)
+    try:
+        results = answer_judging_service.list_repository_results(repository_id)
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
     return [TestResultResponse.from_record(result) for result in results]
 
 
@@ -111,9 +93,8 @@ def list_repository_test_results(repository_id: UUID) -> list[TestResultResponse
     response_model=list[SavedLearningResponse],
 )
 def list_repository_learnings(repository_id: UUID) -> list[SavedLearningResponse]:
-    repository = repository_repo.get(repository_id)
-    if repository is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="repository not found")
-
-    learnings = saved_learning_repo.list_for_repository(repository_id)
+    try:
+        learnings = learning_service.list_repository_learnings(repository_id)
+    except ServiceError as exc:
+        raise_http_for_service_error(exc)
     return [SavedLearningResponse.from_record(learning) for learning in learnings]

@@ -1,0 +1,288 @@
+export type RepositoryStatus = "pending" | "indexing" | "indexed" | "failed" | "needs_attention";
+export type JobStatus = "queued" | "running" | "retry_wait" | "succeeded" | "failed" | "cancelled";
+export type AgentStatus =
+  | "queued"
+  | "running"
+  | "waiting_on_model"
+  | "validating"
+  | "succeeded"
+  | "retrying"
+  | "failed"
+  | "cancelled"
+  | "interrupted";
+
+export type AgentActivity =
+  | "planning"
+  | "waiting_on_model"
+  | "executing_tool"
+  | "validating"
+  | "verifying_evidence"
+  | "persisting"
+  | "retrying";
+
+export type RuntimeConfig = {
+  env: string;
+  cache_root: string;
+  model_provider: string;
+  ollama_base_url: string;
+  test_generator_model: string;
+  answer_judge_model: string;
+  generation_questions_per_category: number;
+  generation_max_questions_per_category: number;
+  generation_max_questions_per_job: number;
+};
+
+export type Repository = {
+  id: string;
+  name: string;
+  source_type: "local_path" | "github";
+  source_uri: string;
+  default_branch: string | null;
+  status: RepositoryStatus;
+  last_processed_commit_sha: string | null;
+  last_indexed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Job = {
+  id: string;
+  repository_id: string | null;
+  job_type: string;
+  status: JobStatus;
+  result_metadata: Record<string, unknown>;
+  created_at: string;
+};
+
+export type JobDetail = Job & {
+  attempt_count: number;
+  max_attempts: number;
+  payload: Record<string, unknown>;
+  run_after: string;
+  locked_by: string | null;
+  locked_at: string | null;
+  lease_expires_at: string | null;
+  idempotency_key: string | null;
+  error_summary: string | null;
+  updated_at: string;
+};
+
+export type DriftEvent = {
+  id: string;
+  repository_id: string;
+  snapshot_id: string | null;
+  from_commit_sha: string | null;
+  to_commit_sha: string;
+  drift_score: string;
+  severity: "low" | "medium" | "high";
+  breakdown: Record<string, unknown>;
+  created_at: string;
+};
+
+export type RepositorySchedule = {
+  id: string;
+  repository_id: string;
+  enabled: boolean;
+  drift_min_score: string;
+  drift_max_score: string | null;
+  pack_types: string[];
+  generation_plan: Array<{
+    category: string;
+    question_count: number;
+  }>;
+  max_questions_per_trigger: number;
+  active_since: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ContextPackSource = {
+  id: string;
+  context_pack_id: string;
+  source_type: string;
+  source_uri: string;
+  content_hash: string | null;
+  created_at: string;
+};
+
+export type ContextPack = {
+  id: string;
+  repository_id: string;
+  snapshot_id: string;
+  attention_profile_id: string | null;
+  pack_type: string;
+  artifact_uri: string;
+  content_hash: string | null;
+  sources: ContextPackSource[];
+  created_at: string;
+};
+
+export type GeneratedTestType = "short_answer" | "mcq_single" | "mcq_multi";
+
+export type TestEvidenceRef = {
+  source_type: string;
+  source_uri: string;
+  content_hash?: string | null;
+  context_pack_id?: string | null;
+};
+
+export type TestOption = {
+  id: string;
+  text: string;
+};
+
+type GeneratedTestPresentationBase = {
+  schema_version: number;
+  question: string;
+  evidence_refs: TestEvidenceRef[];
+};
+
+export type GeneratedTestPresentation =
+  | (GeneratedTestPresentationBase & { type: "short_answer" })
+  | (GeneratedTestPresentationBase & { type: "mcq_single"; options: TestOption[] })
+  | (GeneratedTestPresentationBase & { type: "mcq_multi"; options: TestOption[] });
+
+export type GeneratedTest = {
+  id: string;
+  repository_id: string;
+  snapshot_id: string;
+  drift_event_id: string | null;
+  agent_run_id: string | null;
+  context_pack_id: string | null;
+  category: string;
+  presentation_payload: GeneratedTestPresentation;
+  prompt_version: string | null;
+  created_at: string;
+};
+
+export type TestAnswerPayload =
+  | { type: "short_answer"; response_text: string; metadata?: Record<string, unknown> }
+  | { type: "mcq_single"; selected_option_id: string; metadata?: Record<string, unknown> }
+  | { type: "mcq_multi"; selected_option_ids: string[]; metadata?: Record<string, unknown> };
+
+export type TestAnswer = {
+  id: string;
+  generated_test_id: string;
+  answer_payload: TestAnswerPayload;
+  submitted_at: string;
+};
+
+type TestGradingGuidanceBase = {
+  rubric: Array<{ criterion: string; description: string; weight: number }>;
+  explanation?: string | null;
+};
+
+export type TestGradingGuidance =
+  | (TestGradingGuidanceBase & { type: "short_answer"; expected_answer: string })
+  | (TestGradingGuidanceBase & {
+      type: "mcq_single" | "mcq_multi";
+      correct_option_ids: string[];
+    });
+
+export type TestResult = {
+  id: string;
+  generated_test_id: string;
+  test_answer_id: string | null;
+  agent_run_id: string | null;
+  score: string;
+  status: string;
+  feedback: Record<string, unknown>;
+  grading_guidance: TestGradingGuidance | null;
+  alert_flag: boolean;
+  created_at: string;
+};
+
+export type SavedLearning = {
+  id: string;
+  repository_id: string;
+  test_result_id: string | null;
+  title: string;
+  summary: string;
+  source_payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AttentionProfile = {
+  id: string;
+  repository_id: string;
+  name: string;
+  default_weight: string;
+  active: boolean;
+  focus_areas: Array<{
+    id: string;
+    attention_profile_id: string;
+    name: string;
+    description: string | null;
+    weight: string;
+    path_globs: string[];
+    created_at: string;
+  }>;
+  created_at: string;
+};
+
+export type AgentRun = {
+  id: string;
+  job_id: string | null;
+  repository_id: string | null;
+  run_type: string;
+  status: AgentStatus;
+  model_profile: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+};
+
+export type AgentStep = {
+  id: string;
+  agent_run_id: string;
+  parent_step_id: string | null;
+  context_pack_id: string | null;
+  step_type: string;
+  status: AgentStatus;
+  activity: AgentActivity | null;
+  sequence: number;
+  iteration: number | null;
+  input_summary: Record<string, unknown>;
+  output_summary: Record<string, unknown>;
+  warning_summary: Record<string, unknown>[];
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+};
+
+export type AgentArtifact = {
+  id: string;
+  agent_step_id: string;
+  artifact_type: string;
+  artifact_uri: string;
+  content_hash: string | null;
+  created_at: string;
+};
+
+export type ExecutionEvent = {
+  id: number;
+  repository_id: string | null;
+  job_id: string | null;
+  agent_run_id: string | null;
+  agent_step_id: string | null;
+  event_type: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+};
+
+export type AgentRunSnapshot = {
+  run: AgentRun;
+  steps: AgentStep[];
+  artifacts: AgentArtifact[];
+  last_event_id: number;
+};
+
+export type ProvenanceRef = {
+  id: string;
+  artifact_id: string;
+  ref_type: string;
+  ref_uri: string;
+  content_hash: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+};

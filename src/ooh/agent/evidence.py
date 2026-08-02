@@ -174,6 +174,17 @@ def collect_available_evidence_refs(context_pack: dict[str, Any]) -> dict[str, d
             content_hash=_string(guidance.get("content_hash")),
         )
 
+    tool_inspection = context_pack.get("tool_inspection")
+    if isinstance(tool_inspection, dict):
+        for tool_call in _dicts(tool_inspection.get("tool_calls")):
+            for evidence_ref in _dicts(tool_call.get("evidence_refs")):
+                _add_available_ref(
+                    available_refs,
+                    source_type=_string(evidence_ref.get("source_type")),
+                    source_uri=_string(evidence_ref.get("source_uri")),
+                    content_hash=_string(evidence_ref.get("content_hash")),
+                )
+
     drift = context_pack.get("drift")
     if isinstance(drift, dict):
         drift_id = _string(drift.get("id"))

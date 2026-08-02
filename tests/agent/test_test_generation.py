@@ -3,6 +3,7 @@ from typing import Any
 
 import pytest
 
+from ooh.agent.loop_runtime import AgentLoopDeadlineExceeded, LoopDeadline
 from ooh.agent.providers import ModelRequest, ModelResponse
 from ooh.agent.test_generation import (
     GeneratedTestAgentLoop,
@@ -14,6 +15,7 @@ from ooh.agent.test_generation import (
     build_test_generation_request,
     extract_json_object,
     parse_generated_test_payload,
+    select_generated_test_type,
 )
 from ooh.agent.evidence import verify_generated_test_evidence
 
@@ -37,10 +39,113 @@ def test_build_test_generation_request_asks_for_json() -> None:
 
     assert request.model == "qwen3-coder:8b"
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
+    assert "short_answer" in json.dumps(request.response_schema)
+    assert "mcq_single" not in json.dumps(request.response_schema)
     assert request.metadata["prompt_version"] == "test-generation-v1"
+    assert request.metadata["test_type"] == "short_answer"
     assert request.messages[0].role == "system"
     assert request.messages[1].role == "user"
     assert "high_level_design" in request.messages[1].content
+
+
+def test_build_test_generation_request_constrains_evidence_to_visible_refs() -> None:
+    request = build_test_generation_request(
+        model="qwen3:8b",
+        context_pack={
+            "pack_type": "active_pr",
+            "source_refs": [
+                {"source_type": "code", "source_uri": "code:src/app.py"},
+                {"source_type": "guidance", "source_uri": "guidance:README.md"},
+            ],
+        },
+    )
+
+    assert request.response_schema["properties"]["evidence_refs"]["items"]["enum"] == [
+        "code:src/app.py",
+        "guidance:README.md",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pack_type", "test_type"),
+    [
+        ("high_level_design", "short_answer"),
+        ("low_level_components", "mcq_single"),
+        ("design_decisions", "short_answer"),
+        ("future_improvements", "mcq_multi"),
+        ("active_pr", "short_answer"),
+        ("unknown", "short_answer"),
+    ],
+)
+def test_select_generated_test_type_is_deterministic(pack_type: str, test_type: str) -> None:
+    assert select_generated_test_type({"pack_type": pack_type}) == test_type
+
+
+def test_build_test_generation_request_mentions_tool_inspection_when_present() -> None:
+    request = build_test_generation_request(
+        model="qwen3-coder:8b",
+        context_pack={
+            "pack_type": "low_level_components",
+            "tool_inspection": {
+                "tool_calls": [
+                    {
+                        "tool_name": "repo.read_symbol",
+                        "payload": {"symbol": {"qualified_name": "Service.handle"}},
+                    }
+                ]
+            },
+        },
+    )
+
+    assert "tool_inspection" in request.messages[0].content
+    assert "Service.handle" in request.messages[1].content
+
+
+def test_build_test_generation_request_bounds_large_context_pack() -> None:
+    context_pack = {
+        "pack_type": "low_level_components",
+        "purpose": "Inspect implementation details.",
+        "source_refs": [
+            {"source_type": "code", "source_uri": f"code:src/module_{index}.py"}
+            for index in range(100)
+        ],
+        "included_files": [
+            {
+                "path": f"src/module_{index}.py",
+                "language": "python",
+                "content_excerpt": {"text": "value = 1\n" * 1_000},
+            }
+            for index in range(20)
+        ],
+        "tool_inspection": {
+            "tool_calls": [
+                {
+                    "call_id": "read-1",
+                    "tool_name": "repo.read_file_range",
+                    "payload": {"content": "return value.upper()\n" * 1_000},
+                    "evidence_refs": [
+                        {"source_type": "code", "source_uri": "code:src/module_0.py"}
+                    ],
+                }
+            ]
+        },
+    }
+
+    request = build_test_generation_request(
+        model="qwen3:8b",
+        context_pack=context_pack,
+        max_prompt_bytes=4_000,
+        max_tool_observation_bytes=800,
+    )
+
+    prompt_bytes = sum(len(message.content.encode("utf-8")) for message in request.messages)
+    assert prompt_bytes <= 4_000
+    assert request.metadata["prompt_bytes"] == prompt_bytes
+    assert request.metadata["prompt_max_bytes"] == 4_000
+    assert request.metadata["context_original_bytes"] > request.metadata["context_prompt_bytes"]
+    assert request.metadata["context_truncated"] is True
+    assert "code:src/module_0.py" in request.messages[1].content
 
 
 def test_build_test_generation_repair_request_includes_error_and_invalid_output() -> None:
@@ -52,6 +157,7 @@ def test_build_test_generation_repair_request_includes_error_and_invalid_output(
     )
 
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
     assert request.temperature == 0
     assert request.metadata["repair"] is True
     assert "expected_answer missing" in request.messages[1].content
@@ -76,6 +182,7 @@ def test_build_test_generation_evidence_feedback_request_includes_rejected_refs(
     )
 
     assert request.response_format == "json_object"
+    assert request.response_schema is not None
     assert request.metadata["evidence_feedback"] is True
     assert "code:missing.py" in request.messages[1].content
     assert "code:src/app.py" in request.messages[1].content
@@ -124,8 +231,22 @@ def test_parse_generated_test_payload_normalizes_valid_payload() -> None:
 
 
 def test_parse_generated_test_payload_rejects_invalid_contract() -> None:
-    with pytest.raises(GeneratedTestPayloadError, match="generated test contract"):
+    with pytest.raises(GeneratedTestPayloadError, match="expected_answer"):
         parse_generated_test_payload('{"type": "short_answer", "question": "Missing answer"}')
+
+
+def test_parse_generated_test_payload_rejects_a_different_planned_type() -> None:
+    with pytest.raises(GeneratedTestPayloadError, match="mcq_single"):
+        parse_generated_test_payload(
+            json.dumps(
+                {
+                    "type": "short_answer",
+                    "question": "What matters?",
+                    "expected_answer": "The evidence matters.",
+                }
+            ),
+            expected_type="mcq_single",
+        )
 
 
 def test_pipeline_calls_provider_and_returns_candidate() -> None:
@@ -170,16 +291,34 @@ def test_agent_loop_repairs_invalid_payload() -> None:
     assert result.turns[0].validation_error is not None
     assert result.turns[1].validation_error is None
     assert provider.requests[1].metadata["repair"] is True
+    assert "expected_answer" in provider.requests[1].messages[1].content
+
+
+def test_agent_loop_enforces_shared_deadline_after_model_call() -> None:
+    clock_value = [0.0]
+
+    class SlowProvider:
+        def generate(self, request: ModelRequest) -> ModelResponse:
+            clock_value[0] = 11
+            return ModelResponse(model=request.model, content="{}", raw_response={"ok": True})
+
+    deadline = LoopDeadline.start(10, clock=lambda: clock_value[0])
+    loop = GeneratedTestAgentLoop(SlowProvider(), model="qwen3:8b")
+
+    with pytest.raises(AgentLoopDeadlineExceeded, match="validating the test model response"):
+        loop.run({"pack_type": "active_pr"}, deadline=deadline)
 
 
 def test_agent_loop_fails_after_repair_budget() -> None:
     provider = FakeProvider('{"type": "short_answer", "question": "Missing answer"}')
     loop = GeneratedTestAgentLoop(provider, model="qwen3-coder:8b", max_repair_attempts=1)
 
-    with pytest.raises(GeneratedTestPayloadError, match="after 2 attempts"):
+    with pytest.raises(GeneratedTestPayloadError, match="after 2 attempts") as exc_info:
         loop.run({"pack_type": "active_pr"})
 
     assert len(provider.requests) == 2
+    assert [turn.action for turn in exc_info.value.turns] == ["generate", "repair"]
+    assert all(turn.validation_error is not None for turn in exc_info.value.turns)
 
 
 def test_agent_loop_regenerates_invalid_evidence_refs() -> None:
@@ -239,7 +378,7 @@ def test_agent_loop_fails_after_evidence_regeneration_budget() -> None:
     )
     loop = GeneratedTestAgentLoop(provider, model="qwen3-coder:8b", max_evidence_regenerations=1)
 
-    with pytest.raises(GeneratedTestEvidenceError, match="after 2 attempts"):
+    with pytest.raises(GeneratedTestEvidenceError, match="after 2 attempts") as exc_info:
         loop.run(
             {
                 "pack_type": "active_pr",
@@ -248,6 +387,11 @@ def test_agent_loop_fails_after_evidence_regeneration_budget() -> None:
         )
 
     assert len(provider.requests) == 2
+    assert [turn.action for turn in exc_info.value.turns] == [
+        "generate",
+        "regenerate_evidence",
+    ]
+    assert all(turn.evidence_error is not None for turn in exc_info.value.turns)
 
 
 def test_pipeline_accepts_protocol_provider() -> None:

@@ -1,24 +1,50 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
+from uuid import UUID
 
 from pydantic import ValidationError
 
-from ooh.agent.contracts import normalize_generated_test_payload
+from ooh.agent.contracts import (
+    GeneratedTestType,
+    generated_test_wire_json_schema,
+    normalize_generated_test_payload,
+)
 from ooh.agent.evidence import EvidenceVerificationResult, verify_generated_test_evidence
+from ooh.agent.execution_tracing import (
+    ExecutionTracer,
+    TraceBranch,
+    TraceHandle,
+    TraceNodeSpec,
+    TracedModelCall,
+    execute_model_call,
+)
+from ooh.agent.loop_runtime import LoopDeadline
+from ooh.agent.prompt_budget import (
+    DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+    DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    PromptContextView,
+    build_prompt_context_view,
+    serialize_prompt_context,
+    truncate_text_bytes,
+)
 from ooh.agent.providers import ModelMessage, ModelProvider, ModelRequest, ModelResponse
+from ooh.db.models import AgentActivity, AgentArtifactType, AgentStepType
 
 TEST_GENERATION_PROMPT_VERSION = "test-generation-v1"
-
-
-class GeneratedTestPayloadError(RuntimeError):
-    pass
-
-
-class GeneratedTestEvidenceError(RuntimeError):
-    pass
+GENERATION_MODEL_CALL_SEQUENCE_BASE = 100_000
+GENERATION_TURN_SEQUENCE_STRIDE = 10
+GENERATION_VALIDATION_SEQUENCE_OFFSET = 1
+GENERATION_EVIDENCE_SEQUENCE_OFFSET = 2
+TEST_TYPE_BY_PACK_TYPE: dict[str, GeneratedTestType] = {
+    "high_level_design": "short_answer",
+    "low_level_components": "mcq_single",
+    "design_decisions": "short_answer",
+    "future_improvements": "mcq_multi",
+    "active_pr": "short_answer",
+}
 
 
 @dataclass(frozen=True)
@@ -38,6 +64,9 @@ class GeneratedTestLoopTurn:
     payload: dict[str, Any] | None
     evidence_error: str | None = None
     evidence_result: EvidenceVerificationResult | None = None
+    model_trace: TracedModelCall | None = None
+    validation_trace: TraceHandle | None = None
+    evidence_trace: TraceHandle | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +74,28 @@ class GeneratedTestLoopResult:
     payload: dict[str, Any]
     turns: list[GeneratedTestLoopTurn]
     prompt_version: str
+
+
+class GeneratedTestPayloadError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        turns: list[GeneratedTestLoopTurn] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.turns = list(turns or [])
+
+
+class GeneratedTestEvidenceError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        turns: list[GeneratedTestLoopTurn] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.turns = list(turns or [])
 
 
 class GeneratedTestAgentLoop:
@@ -55,31 +106,127 @@ class GeneratedTestAgentLoop:
         model: str,
         max_repair_attempts: int = 1,
         max_evidence_regenerations: int = 1,
+        max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+        max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+        tracer: ExecutionTracer | None = None,
     ) -> None:
         if max_repair_attempts < 0:
             raise ValueError("max_repair_attempts must be non-negative")
         if max_evidence_regenerations < 0:
             raise ValueError("max_evidence_regenerations must be non-negative")
+        if max_prompt_bytes < 4_000:
+            raise ValueError("max_prompt_bytes must be at least 4000")
+        if max_tool_observation_bytes < 500:
+            raise ValueError("max_tool_observation_bytes must be at least 500")
         self.provider = provider
         self.model = model
         self.max_repair_attempts = max_repair_attempts
         self.max_evidence_regenerations = max_evidence_regenerations
+        self.max_prompt_bytes = max_prompt_bytes
+        self.max_tool_observation_bytes = max_tool_observation_bytes
+        self.tracer = tracer
 
-    def run(self, context_pack: dict[str, Any]) -> GeneratedTestLoopResult:
+    def run(
+        self,
+        context_pack: dict[str, Any],
+        *,
+        deadline: LoopDeadline | None = None,
+        trace_branch: TraceBranch | None = None,
+        question_number: int = 1,
+        question_count: int = 1,
+        excluded_questions: list[str] | None = None,
+    ) -> GeneratedTestLoopResult:
+        excluded_questions = excluded_questions or []
         turns: list[GeneratedTestLoopTurn] = []
-        request = build_test_generation_request(model=self.model, context_pack=context_pack)
+        test_type = select_generated_test_type(context_pack)
+        request = build_test_generation_request(
+            model=self.model,
+            context_pack=context_pack,
+            test_type=test_type,
+            max_prompt_bytes=self.max_prompt_bytes,
+            max_tool_observation_bytes=self.max_tool_observation_bytes,
+            question_number=question_number,
+            question_count=question_count,
+            excluded_questions=excluded_questions,
+        )
         action = "generate"
         sequence = 0
         repair_attempts = 0
         evidence_regenerations = 0
+        next_parent_step_id = trace_branch.parent_step_id if trace_branch is not None else None
 
         while True:
             sequence += 1
-            response = self.provider.generate(request)
+            if deadline is not None:
+                request = replace(
+                    request,
+                    timeout_seconds=deadline.remaining_seconds(action="calling the test model"),
+                )
+            turn_sequence_base = (
+                trace_branch.sequence_base
+                + GENERATION_MODEL_CALL_SEQUENCE_BASE
+                + sequence * GENERATION_TURN_SEQUENCE_STRIDE
+                if trace_branch is not None
+                else 0
+            )
+            model_trace = execute_model_call(
+                provider=self.provider,
+                request=request,
+                tracer=self.tracer,
+                spec=(
+                    TraceNodeSpec(
+                        branch=trace_branch,
+                        step_type=AgentStepType.MODEL_CALL,
+                        sequence=turn_sequence_base,
+                        iteration=sequence,
+                        activity=AgentActivity.WAITING_ON_MODEL,
+                        action=action,
+                        parent_step_id=next_parent_step_id,
+                        input_summary={
+                            "phase": "test_generation",
+                            "question_number": question_number,
+                            "question_count": question_count,
+                        },
+                    )
+                    if trace_branch is not None
+                    else None
+                ),
+            )
+            response = model_trace.response
+            if deadline is not None:
+                deadline.remaining_seconds(action="validating the test model response")
+            model_step_id = (
+                model_trace.handle.step.id
+                if model_trace.handle is not None
+                else next_parent_step_id
+            )
+            validation_trace = self._start_trace_step(
+                trace_branch=trace_branch,
+                parent_step_id=model_step_id,
+                step_type=AgentStepType.VALIDATE_OUTPUT,
+                activity=AgentActivity.VALIDATING,
+                action="validate_output",
+                sequence=turn_sequence_base + GENERATION_VALIDATION_SEQUENCE_OFFSET,
+                iteration=sequence,
+                input_summary={"model_action": action, "test_type": test_type},
+            )
             try:
-                payload = parse_generated_test_payload(response.content)
+                payload = parse_generated_test_payload(
+                    response.content,
+                    expected_type=test_type,
+                )
             except GeneratedTestPayloadError as exc:
                 validation_error = str(exc)
+                self._fail_trace_step(
+                    validation_trace,
+                    exc,
+                    suffix="validation-error",
+                    payload={
+                        "turn_sequence": sequence,
+                        "action": action,
+                        "validation_error": validation_error,
+                    },
+                )
                 turns.append(
                     GeneratedTestLoopTurn(
                         sequence=sequence,
@@ -88,11 +235,14 @@ class GeneratedTestAgentLoop:
                         model_response=response,
                         validation_error=validation_error,
                         payload=None,
+                        model_trace=model_trace,
+                        validation_trace=validation_trace,
                     )
                 )
                 if repair_attempts >= self.max_repair_attempts:
                     raise GeneratedTestPayloadError(
-                        f"model output did not become valid after {sequence} attempts: {validation_error}"
+                        f"model output did not become valid after {sequence} attempts: {validation_error}",
+                        turns=turns,
                     ) from exc
                 repair_attempts += 1
                 request = build_test_generation_repair_request(
@@ -100,13 +250,62 @@ class GeneratedTestAgentLoop:
                     context_pack=context_pack,
                     invalid_output=response.content,
                     validation_error=validation_error,
+                    test_type=test_type,
+                    max_prompt_bytes=self.max_prompt_bytes,
+                    max_tool_observation_bytes=self.max_tool_observation_bytes,
+                    question_number=question_number,
+                    question_count=question_count,
+                    excluded_questions=excluded_questions,
                 )
                 action = "repair"
+                if validation_trace is not None:
+                    next_parent_step_id = validation_trace.step.id
                 continue
 
-            evidence_result = verify_generated_test_evidence(payload, context_pack)
+            self._succeed_trace_step(
+                validation_trace,
+                output_summary={
+                    "payload_type": payload.get("type"),
+                    "schema_valid": True,
+                },
+            )
+            evidence_trace = self._start_trace_step(
+                trace_branch=trace_branch,
+                parent_step_id=(
+                    validation_trace.step.id if validation_trace is not None else model_step_id
+                ),
+                step_type=AgentStepType.VERIFY_EVIDENCE,
+                activity=AgentActivity.VERIFYING_EVIDENCE,
+                action="verify_evidence",
+                sequence=turn_sequence_base + GENERATION_EVIDENCE_SEQUENCE_OFFSET,
+                iteration=sequence,
+                input_summary={"evidence_ref_count": len(payload.get("evidence_refs", []))},
+            )
+            try:
+                evidence_result = verify_generated_test_evidence(payload, context_pack)
+            except Exception as exc:
+                self._fail_trace_step(
+                    evidence_trace,
+                    exc,
+                    suffix="evidence-verification-error",
+                    payload={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+                raise
             if not evidence_result.is_valid:
                 evidence_error = evidence_result.error_message()
+                evidence_summary = evidence_result.to_dict()
+                self._fail_trace_step(
+                    evidence_trace,
+                    GeneratedTestEvidenceError(evidence_error),
+                    suffix="evidence-error",
+                    payload={
+                        "turn_sequence": sequence,
+                        "action": action,
+                        "evidence_error": evidence_error,
+                        "evidence_result": evidence_summary,
+                    },
+                    output_summary=evidence_summary,
+                )
                 turns.append(
                     GeneratedTestLoopTurn(
                         sequence=sequence,
@@ -117,12 +316,16 @@ class GeneratedTestAgentLoop:
                         payload=payload,
                         evidence_error=evidence_error,
                         evidence_result=evidence_result,
+                        model_trace=model_trace,
+                        validation_trace=validation_trace,
+                        evidence_trace=evidence_trace,
                     )
                 )
                 if evidence_regenerations >= self.max_evidence_regenerations:
                     raise GeneratedTestEvidenceError(
                         "model output did not reference valid evidence after "
-                        f"{sequence} attempts: {evidence_error}"
+                        f"{sequence} attempts: {evidence_error}",
+                        turns=turns,
                     )
                 evidence_regenerations += 1
                 request = build_test_generation_evidence_feedback_request(
@@ -130,10 +333,22 @@ class GeneratedTestAgentLoop:
                     context_pack=context_pack,
                     invalid_payload=payload,
                     evidence_result=evidence_result,
+                    test_type=test_type,
+                    max_prompt_bytes=self.max_prompt_bytes,
+                    max_tool_observation_bytes=self.max_tool_observation_bytes,
+                    question_number=question_number,
+                    question_count=question_count,
+                    excluded_questions=excluded_questions,
                 )
                 action = "regenerate_evidence"
+                if evidence_trace is not None:
+                    next_parent_step_id = evidence_trace.step.id
                 continue
 
+            self._succeed_trace_step(
+                evidence_trace,
+                output_summary={"evidence_valid": True, **evidence_result.to_dict()},
+            )
             turns.append(
                 GeneratedTestLoopTurn(
                     sequence=sequence,
@@ -143,6 +358,9 @@ class GeneratedTestAgentLoop:
                     validation_error=None,
                     payload=evidence_result.payload,
                     evidence_result=evidence_result,
+                    model_trace=model_trace,
+                    validation_trace=validation_trace,
+                    evidence_trace=evidence_trace,
                 )
             )
             return GeneratedTestLoopResult(
@@ -150,6 +368,61 @@ class GeneratedTestAgentLoop:
                 turns=turns,
                 prompt_version=TEST_GENERATION_PROMPT_VERSION,
             )
+
+    def _start_trace_step(
+        self,
+        *,
+        trace_branch: TraceBranch | None,
+        parent_step_id: UUID | None,
+        step_type: AgentStepType,
+        activity: AgentActivity,
+        action: str,
+        sequence: int,
+        iteration: int,
+        input_summary: dict[str, Any],
+    ) -> TraceHandle | None:
+        if self.tracer is None or trace_branch is None:
+            return None
+        return self.tracer.start(
+            TraceNodeSpec(
+                branch=trace_branch,
+                parent_step_id=parent_step_id,
+                step_type=step_type,
+                sequence=sequence,
+                iteration=iteration,
+                activity=activity,
+                action=action,
+                input_summary=input_summary,
+            )
+        )
+
+    def _succeed_trace_step(
+        self,
+        handle: TraceHandle | None,
+        *,
+        output_summary: dict[str, Any],
+    ) -> None:
+        if self.tracer is not None and handle is not None:
+            self.tracer.succeed(handle, output_summary=output_summary)
+
+    def _fail_trace_step(
+        self,
+        handle: TraceHandle | None,
+        error: Exception,
+        *,
+        suffix: str,
+        payload: dict[str, Any],
+        output_summary: dict[str, Any] | None = None,
+    ) -> None:
+        if self.tracer is None or handle is None:
+            return
+        self.tracer.write_json_artifact(
+            handle,
+            suffix=suffix,
+            artifact_type=AgentArtifactType.TRACE,
+            payload=payload,
+        )
+        self.tracer.fail(handle, error, output_summary=output_summary)
 
 
 class GeneratedTestPipeline:
@@ -173,33 +446,80 @@ class GeneratedTestPipeline:
         )
 
 
-def build_test_generation_request(*, model: str, context_pack: dict[str, Any]) -> ModelRequest:
+def select_generated_test_type(context_pack: dict[str, Any]) -> GeneratedTestType:
+    pack_type = context_pack.get("pack_type")
+    if not isinstance(pack_type, str):
+        return "short_answer"
+    return TEST_TYPE_BY_PACK_TYPE.get(pack_type, "short_answer")
+
+
+def build_test_generation_request(
+    *,
+    model: str,
+    context_pack: dict[str, Any],
+    test_type: GeneratedTestType | None = None,
+    max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+    max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    question_number: int = 1,
+    question_count: int = 1,
+    excluded_questions: list[str] | None = None,
+) -> ModelRequest:
+    excluded_questions = excluded_questions or []
+    requested_test_type = test_type or select_generated_test_type(context_pack)
+    tool_inspection_hint = (
+        "Use tool_inspection results when present; prefer evidence from tool calls for "
+        "symbol-level or line-level questions. "
+        if "tool_inspection" in context_pack
+        else ""
+    )
+    system_content = (
+        "You generate repository-understanding tests for developers. "
+        f"Return exactly one {requested_test_type} JSON object and no prose. "
+        "Include evidence_refs as source_uri strings present in the context pack. "
+        f"{tool_inspection_hint}"
+        f"{test_type_instructions(requested_test_type)}"
+    )
+    user_prefix = (
+        f"Generate question {question_number} of {question_count} as one high-signal test "
+        "from this context pack. "
+        "Prefer questions that require understanding repository-specific evidence.\n\n"
+        f"{_diversity_prompt(excluded_questions)}"
+        "Context pack:\n"
+    )
+    user_content, context_view = _user_message_with_context(
+        context_pack=context_pack,
+        system_content=system_content,
+        user_prefix=user_prefix,
+        max_prompt_bytes=max_prompt_bytes,
+        max_tool_observation_bytes=max_tool_observation_bytes,
+    )
+    metadata = _prompt_metadata(
+        context_view,
+        system_content=system_content,
+        user_content=user_content,
+        max_prompt_bytes=max_prompt_bytes,
+    )
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=generated_test_wire_json_schema(
+            requested_test_type,
+            evidence_source_uris=_visible_source_uris(context_view.payload),
+        ),
         temperature=0.2,
         messages=[
-            ModelMessage(
-                role="system",
-                content=(
-                    "You generate repository-understanding tests for developers. "
-                    "Return exactly one JSON object and no prose. The JSON must match one of "
-                    "these types: short_answer, mcq_single, mcq_multi. Include evidence_refs "
-                    "using source_uri values present in the context pack when possible. "
-                    "For MCQ options, use objects like {\"id\":\"A\",\"text\":\"...\"}; "
-                    "use correct_option_ids, not answer."
-                ),
-            ),
-            ModelMessage(
-                role="user",
-                content=(
-                    "Generate one high-signal test from this context pack. "
-                    "Prefer questions that require understanding repository-specific evidence.\n\n"
-                    f"{json.dumps(context_pack, indent=2, sort_keys=True)}"
-                ),
-            ),
+            ModelMessage(role="system", content=system_content),
+            ModelMessage(role="user", content=user_content),
         ],
-        metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION},
+        metadata={
+            **metadata,
+            "prompt_version": TEST_GENERATION_PROMPT_VERSION,
+            "test_type": requested_test_type,
+            "call_action": "generate",
+            "question_number": question_number,
+            "question_count": question_count,
+            "excluded_question_count": len(excluded_questions),
+        },
     )
 
 
@@ -209,34 +529,64 @@ def build_test_generation_repair_request(
     context_pack: dict[str, Any],
     invalid_output: str,
     validation_error: str,
+    test_type: GeneratedTestType | None = None,
+    max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+    max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    question_number: int = 1,
+    question_count: int = 1,
+    excluded_questions: list[str] | None = None,
 ) -> ModelRequest:
+    excluded_questions = excluded_questions or []
+    requested_test_type = test_type or select_generated_test_type(context_pack)
+    system_content = (
+        "You repair generated repository-understanding test JSON. "
+        f"Return exactly one corrected {requested_test_type} JSON object and no prose. "
+        "Return evidence_refs as source_uri strings. "
+        f"{test_type_instructions(requested_test_type)}"
+    )
+    user_prefix = (
+        "The previous model output failed validation. Repair it using the validation error "
+        "and context pack below.\n\n"
+        f"Validation error excerpt:\n{truncate_text_bytes(validation_error, 1_000)}\n\n"
+        f"Invalid output excerpt:\n{truncate_text_bytes(invalid_output, 1_500)}\n\n"
+        f"{_diversity_prompt(excluded_questions)}"
+        "Context pack:\n"
+    )
+    user_content, context_view = _user_message_with_context(
+        context_pack=context_pack,
+        system_content=system_content,
+        user_prefix=user_prefix,
+        max_prompt_bytes=max_prompt_bytes,
+        max_tool_observation_bytes=max_tool_observation_bytes,
+    )
+    metadata = _prompt_metadata(
+        context_view,
+        system_content=system_content,
+        user_content=user_content,
+        max_prompt_bytes=max_prompt_bytes,
+    )
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=generated_test_wire_json_schema(
+            requested_test_type,
+            evidence_source_uris=_visible_source_uris(context_view.payload),
+        ),
         temperature=0,
         messages=[
-            ModelMessage(
-                role="system",
-                content=(
-                    "You repair generated repository-understanding test JSON. "
-                    "Return exactly one corrected JSON object and no prose. The JSON must match "
-                    "one of these types: short_answer, mcq_single, mcq_multi. "
-                    "For MCQ options, use objects like {\"id\":\"A\",\"text\":\"...\"}; "
-                    "use correct_option_ids, not answer."
-                ),
-            ),
-            ModelMessage(
-                role="user",
-                content=(
-                    "The previous model output failed validation. Repair it using the "
-                    "validation error and context pack below.\n\n"
-                    f"Validation error:\n{validation_error}\n\n"
-                    f"Invalid output:\n{invalid_output}\n\n"
-                    f"Context pack:\n{json.dumps(context_pack, indent=2, sort_keys=True)}"
-                ),
-            ),
+            ModelMessage(role="system", content=system_content),
+            ModelMessage(role="user", content=user_content),
         ],
-        metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION, "repair": True},
+        metadata={
+            **metadata,
+            "prompt_version": TEST_GENERATION_PROMPT_VERSION,
+            "test_type": requested_test_type,
+            "call_action": "repair",
+            "repair": True,
+            "question_number": question_number,
+            "question_count": question_count,
+            "excluded_question_count": len(excluded_questions),
+        },
     )
 
 
@@ -246,37 +596,178 @@ def build_test_generation_evidence_feedback_request(
     context_pack: dict[str, Any],
     invalid_payload: dict[str, Any],
     evidence_result: EvidenceVerificationResult,
+    test_type: GeneratedTestType | None = None,
+    max_prompt_bytes: int = DEFAULT_GENERATION_PROMPT_MAX_BYTES,
+    max_tool_observation_bytes: int = DEFAULT_TOOL_OBSERVATION_MAX_BYTES,
+    question_number: int = 1,
+    question_count: int = 1,
+    excluded_questions: list[str] | None = None,
 ) -> ModelRequest:
+    excluded_questions = excluded_questions or []
+    requested_test_type = test_type or select_generated_test_type(context_pack)
+    system_content = (
+        "You regenerate repository-understanding test JSON when evidence refs are missing "
+        "or unsupported. Return exactly one JSON object and no prose. Use only source_uri "
+        "values present in the context pack and return evidence_refs as source_uri strings."
+    )
+    evidence_excerpt = truncate_text_bytes(
+        json.dumps(
+            evidence_result.to_dict(), ensure_ascii=False, separators=(",", ":"), sort_keys=True
+        ),
+        1_200,
+    )
+    payload_excerpt = truncate_text_bytes(
+        json.dumps(invalid_payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+        1_500,
+    )
+    user_prefix = (
+        "The previous model output passed schema validation but failed evidence verification. "
+        "Regenerate a grounded test. Keep the question only if it can cite visible evidence.\n\n"
+        f"Evidence verification excerpt:\n{evidence_excerpt}\n\n"
+        f"Previous payload excerpt:\n{payload_excerpt}\n\n"
+        f"{_diversity_prompt(excluded_questions)}"
+        "Context pack:\n"
+    )
+    user_content, context_view = _user_message_with_context(
+        context_pack=context_pack,
+        system_content=system_content,
+        user_prefix=user_prefix,
+        max_prompt_bytes=max_prompt_bytes,
+        max_tool_observation_bytes=max_tool_observation_bytes,
+    )
+    metadata = _prompt_metadata(
+        context_view,
+        system_content=system_content,
+        user_content=user_content,
+        max_prompt_bytes=max_prompt_bytes,
+    )
     return ModelRequest(
         model=model,
         response_format="json_object",
+        response_schema=generated_test_wire_json_schema(
+            requested_test_type,
+            evidence_source_uris=_visible_source_uris(context_view.payload),
+        ),
         temperature=0.2,
         messages=[
-            ModelMessage(
-                role="system",
-                content=(
-                    "You regenerate repository-understanding test JSON when evidence refs are "
-                    "missing or unsupported. Return exactly one JSON object and no prose. Use "
-                    "only source_uri values that are present in the context pack source_refs."
-                ),
-            ),
-            ModelMessage(
-                role="user",
-                content=(
-                    "The previous model output passed schema validation but failed evidence "
-                    "verification. Regenerate a grounded test. You may keep the same question "
-                    "only if it can cite valid evidence refs from the context pack.\n\n"
-                    f"Evidence verification:\n{json.dumps(evidence_result.to_dict(), indent=2, sort_keys=True)}\n\n"
-                    f"Previous payload:\n{json.dumps(invalid_payload, indent=2, sort_keys=True)}\n\n"
-                    f"Context pack:\n{json.dumps(context_pack, indent=2, sort_keys=True)}"
-                ),
-            ),
+            ModelMessage(role="system", content=system_content),
+            ModelMessage(role="user", content=user_content),
         ],
-        metadata={"prompt_version": TEST_GENERATION_PROMPT_VERSION, "evidence_feedback": True},
+        metadata={
+            **metadata,
+            "prompt_version": TEST_GENERATION_PROMPT_VERSION,
+            "test_type": requested_test_type,
+            "call_action": "regenerate_evidence",
+            "evidence_feedback": True,
+            "question_number": question_number,
+            "question_count": question_count,
+            "excluded_question_count": len(excluded_questions),
+        },
     )
 
 
-def parse_generated_test_payload(model_content: str) -> dict[str, Any]:
+def _diversity_prompt(excluded_questions: list[str]) -> str:
+    if not excluded_questions:
+        return ""
+
+    unique_questions = list(dict.fromkeys(question.strip() for question in excluded_questions))
+    bounded_questions = [
+        truncate_text_bytes(question, 300)
+        for question in unique_questions[:12]
+        if question
+    ]
+    if not bounded_questions:
+        return ""
+    return (
+        "Create a materially different question from these recent or already planned questions:\n"
+        f"{json.dumps(bounded_questions, ensure_ascii=False)}\n\n"
+    )
+
+
+def _user_message_with_context(
+    *,
+    context_pack: dict[str, Any],
+    system_content: str,
+    user_prefix: str,
+    max_prompt_bytes: int,
+    max_tool_observation_bytes: int,
+) -> tuple[str, PromptContextView]:
+    fixed_bytes = len(system_content.encode("utf-8")) + len(user_prefix.encode("utf-8"))
+    context_max_bytes = max_prompt_bytes - fixed_bytes
+    if context_max_bytes < 1_000:
+        raise ValueError("prompt budget leaves fewer than 1000 bytes for repository context")
+    context_view = build_prompt_context_view(
+        context_pack,
+        max_bytes=context_max_bytes,
+        tool_observation_max_bytes=max_tool_observation_bytes,
+    )
+    return f"{user_prefix}{serialize_prompt_context(context_view)}", context_view
+
+
+def _prompt_metadata(
+    context_view: PromptContextView,
+    *,
+    system_content: str,
+    user_content: str,
+    max_prompt_bytes: int,
+) -> dict[str, Any]:
+    prompt_bytes = len(system_content.encode("utf-8")) + len(user_content.encode("utf-8"))
+    if prompt_bytes > max_prompt_bytes:
+        raise ValueError("generation request exceeded its prompt byte budget")
+    return {
+        "prompt_bytes": prompt_bytes,
+        "prompt_max_bytes": max_prompt_bytes,
+        "context_original_bytes": context_view.original_bytes,
+        "context_prompt_bytes": context_view.used_bytes,
+        "context_prompt_max_bytes": context_view.max_bytes,
+        "context_truncated": context_view.truncated,
+    }
+
+
+def _visible_source_uris(prompt_context: dict[str, Any]) -> list[str]:
+    source_uris: list[str] = []
+    for source_ref in prompt_context.get("source_refs", []):
+        if not isinstance(source_ref, dict):
+            continue
+        source_uri = source_ref.get("source_uri")
+        if isinstance(source_uri, str) and source_uri:
+            source_uris.append(source_uri)
+
+    tool_inspection = prompt_context.get("tool_inspection")
+    if isinstance(tool_inspection, dict):
+        for tool_call in tool_inspection.get("tool_calls", []):
+            if not isinstance(tool_call, dict):
+                continue
+            for evidence_ref in tool_call.get("evidence_refs", []):
+                if not isinstance(evidence_ref, dict):
+                    continue
+                source_uri = evidence_ref.get("source_uri")
+                if isinstance(source_uri, str) and source_uri:
+                    source_uris.append(source_uri)
+    return list(dict.fromkeys(source_uris))
+
+
+def test_type_instructions(test_type: GeneratedTestType) -> str:
+    if test_type == "short_answer":
+        return "Set type to short_answer and include a non-empty expected_answer."
+    if test_type == "mcq_single":
+        return (
+            "Set type to mcq_single. Include at least two options as objects like "
+            '{"id":"A","text":"..."} and exactly one correct_option_ids entry. '
+            "Do not use answer or correct_answer."
+        )
+    return (
+        "Set type to mcq_multi. Include at least two options as objects like "
+        '{"id":"A","text":"..."} and one or more correct_option_ids entries. '
+        "Do not use answer or correct_answer."
+    )
+
+
+def parse_generated_test_payload(
+    model_content: str,
+    *,
+    expected_type: GeneratedTestType | None = None,
+) -> dict[str, Any]:
     json_text = extract_json_object(model_content)
     try:
         payload = json.loads(json_text)
@@ -287,9 +778,11 @@ def parse_generated_test_payload(model_content: str) -> dict[str, Any]:
         raise GeneratedTestPayloadError("model output JSON must be an object")
 
     try:
-        return normalize_generated_test_payload(payload)
+        return normalize_generated_test_payload(payload, expected_type=expected_type)
     except ValidationError as exc:
-        raise GeneratedTestPayloadError("model output did not match generated test contract") from exc
+        raise GeneratedTestPayloadError(
+            f"model output did not match generated test contract: {exc}"
+        ) from exc
 
 
 def extract_json_object(text: str) -> str:

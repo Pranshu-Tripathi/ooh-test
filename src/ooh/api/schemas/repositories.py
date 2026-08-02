@@ -4,8 +4,9 @@ from pathlib import PurePath
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from ooh.agent.contracts import GeneratedTestPublicPayload, generated_test_public_payload
 from ooh.db.models import (
     AttentionFocusAreaRead,
     AttentionProfileRead,
@@ -20,8 +21,13 @@ from ooh.db.models import (
     JobStatus,
     JobType,
     RepositoryRead,
+    RepositoryScheduleRead,
     RepositorySourceType,
     RepositoryStatus,
+)
+from ooh.generation_config import (
+    MAX_GENERATION_QUESTIONS_PER_CATEGORY,
+    MAX_GENERATION_QUESTIONS_PER_JOB,
 )
 
 
@@ -74,6 +80,7 @@ class JobResponse(BaseModel):
     repository_id: UUID | None
     job_type: JobType
     status: JobStatus
+    result_metadata: dict[str, Any]
     created_at: datetime
 
     @classmethod
@@ -83,6 +90,7 @@ class JobResponse(BaseModel):
             repository_id=job.repository_id,
             job_type=job.job_type,
             status=job.status,
+            result_metadata=job.result_metadata,
             created_at=job.created_at,
         )
 
@@ -92,8 +100,122 @@ class RepositoryRegistrationResponse(BaseModel):
     ingest_job: JobResponse
 
 
+class GenerationPlanItemRequest(BaseModel):
+    category: ContextPackType
+    question_count: int = Field(ge=1, le=MAX_GENERATION_QUESTIONS_PER_CATEGORY)
+
+
 class GenerateTestJobRequest(BaseModel):
     pack_types: list[ContextPackType] | None = Field(default=None, min_length=1, max_length=5)
+    generation_plan: list[GenerationPlanItemRequest] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=5,
+    )
+
+    @model_validator(mode="after")
+    def generation_plan_must_be_bounded(self) -> "GenerateTestJobRequest":
+        if self.pack_types is not None and self.generation_plan is not None:
+            raise ValueError("provide generation_plan or pack_types, not both")
+        if self.pack_types is not None and len(set(self.pack_types)) != len(self.pack_types):
+            raise ValueError("pack_types must not contain duplicates")
+        if self.generation_plan is None:
+            return self
+
+        categories = [item.category for item in self.generation_plan]
+        if len(set(categories)) != len(categories):
+            raise ValueError("generation_plan categories must not contain duplicates")
+        if (
+            sum(item.question_count for item in self.generation_plan)
+            > MAX_GENERATION_QUESTIONS_PER_JOB
+        ):
+            raise ValueError(
+                "generation_plan cannot request more than "
+                f"{MAX_GENERATION_QUESTIONS_PER_JOB} questions"
+            )
+        return self
+
+
+class RepositoryScheduleUpdateRequest(BaseModel):
+    enabled: bool = False
+    drift_min_score: Decimal = Field(default=Decimal("25"), ge=Decimal("0"))
+    drift_max_score: Decimal | None = Field(default=None, ge=Decimal("0"))
+    pack_types: list[ContextPackType] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=5,
+    )
+    generation_plan: list[GenerationPlanItemRequest] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=5,
+    )
+    max_questions_per_trigger: int = Field(
+        default=MAX_GENERATION_QUESTIONS_PER_JOB,
+        ge=1,
+        le=MAX_GENERATION_QUESTIONS_PER_JOB,
+    )
+
+    @model_validator(mode="after")
+    def score_range_must_be_ordered(self) -> "RepositoryScheduleUpdateRequest":
+        if self.drift_max_score is not None and self.drift_max_score < self.drift_min_score:
+            raise ValueError("drift_max_score must be greater than or equal to drift_min_score")
+        if self.pack_types is not None and self.generation_plan is not None:
+            raise ValueError("provide generation_plan or pack_types, not both")
+        if self.pack_types is None and self.generation_plan is None:
+            self.pack_types = [ContextPackType.LOW_LEVEL_COMPONENTS]
+        if self.pack_types is not None and len(set(self.pack_types)) != len(self.pack_types):
+            raise ValueError("pack_types must not contain duplicates")
+        if self.generation_plan is not None:
+            categories = [item.category for item in self.generation_plan]
+            if len(set(categories)) != len(categories):
+                raise ValueError("generation_plan categories must not contain duplicates")
+            if (
+                sum(item.question_count for item in self.generation_plan)
+                > self.max_questions_per_trigger
+            ):
+                raise ValueError(
+                    "generation_plan question count cannot exceed max_questions_per_trigger"
+                )
+        return self
+
+
+class RepositorySchedulePlanItemResponse(BaseModel):
+    category: ContextPackType
+    question_count: int
+
+
+class RepositoryScheduleResponse(BaseModel):
+    id: UUID
+    repository_id: UUID
+    enabled: bool
+    drift_min_score: Decimal
+    drift_max_score: Decimal | None
+    pack_types: list[ContextPackType]
+    generation_plan: list[RepositorySchedulePlanItemResponse]
+    max_questions_per_trigger: int
+    active_since: datetime
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_record(cls, schedule: RepositoryScheduleRead) -> "RepositoryScheduleResponse":
+        return cls(
+            id=schedule.id,
+            repository_id=schedule.repository_id,
+            enabled=schedule.enabled,
+            drift_min_score=schedule.drift_min_score,
+            drift_max_score=schedule.drift_max_score,
+            pack_types=schedule.pack_types,
+            generation_plan=[
+                RepositorySchedulePlanItemResponse.model_validate(item)
+                for item in schedule.generation_plan
+            ],
+            max_questions_per_trigger=schedule.max_questions_per_trigger,
+            active_since=schedule.active_since,
+            created_at=schedule.created_at,
+            updated_at=schedule.updated_at,
+        )
 
 
 class GeneratedTestResponse(BaseModel):
@@ -104,8 +226,7 @@ class GeneratedTestResponse(BaseModel):
     agent_run_id: UUID | None
     context_pack_id: UUID | None
     category: str
-    test_payload: dict[str, Any]
-    evidence_refs: list[dict[str, Any]]
+    presentation_payload: GeneratedTestPublicPayload
     prompt_version: str | None
     created_at: datetime
 
@@ -119,8 +240,7 @@ class GeneratedTestResponse(BaseModel):
             agent_run_id=generated_test.agent_run_id,
             context_pack_id=generated_test.context_pack_id,
             category=generated_test.category.value,
-            test_payload=generated_test.test_payload,
-            evidence_refs=generated_test.evidence_refs,
+            presentation_payload=generated_test_public_payload(generated_test.test_payload),
             prompt_version=generated_test.prompt_version,
             created_at=generated_test.created_at,
         )
