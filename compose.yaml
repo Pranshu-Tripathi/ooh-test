@@ -1,0 +1,87 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ooh}
+      POSTGRES_USER: ${POSTGRES_USER:-ooh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ooh}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  migrate:
+    build: .
+    command: ["python", "-m", "ooh.migrations"]
+    environment:
+      OOH_ENV: ${OOH_ENV:-development}
+      OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: .
+    command: ["python", "-m", "ooh.api.main"]
+    environment:
+      OOH_ENV: ${OOH_ENV:-development}
+      OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_API_HOST: ${OOH_API_HOST:-0.0.0.0}
+      OOH_API_PORT: ${OOH_API_PORT:-8080}
+      OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
+      OOH_CACHE_ROOT: ${OOH_CACHE_ROOT:-/ooh_cache}
+      OOH_MODEL_PROVIDER: ${OOH_MODEL_PROVIDER:-ollama}
+      OOH_OLLAMA_BASE_URL: ${OOH_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OOH_TEST_GENERATOR_MODEL: ${OOH_TEST_GENERATOR_MODEL:-qwen3-coder:8b}
+      OOH_ANSWER_JUDGE_MODEL: ${OOH_ANSWER_JUDGE_MODEL:-deepseek-r1:8b}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./.ooh_cache:/ooh_cache
+      - ${OOH_REPOSITORY_MOUNT:-.:/workspace:ro}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "ooh.api.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+  worker:
+    build: .
+    command: ["python", "-m", "ooh.worker.main"]
+    environment:
+      OOH_ENV: ${OOH_ENV:-development}
+      OOH_LOG_LEVEL: ${OOH_LOG_LEVEL:-INFO}
+      OOH_WORKER_POLL_INTERVAL_SECONDS: ${OOH_WORKER_POLL_INTERVAL_SECONDS:-5}
+      OOH_DATABASE_URL: ${OOH_DATABASE_URL:-postgresql://ooh:ooh@postgres:5432/ooh}
+      OOH_CACHE_ROOT: ${OOH_CACHE_ROOT:-/ooh_cache}
+      OOH_MODEL_PROVIDER: ${OOH_MODEL_PROVIDER:-ollama}
+      OOH_OLLAMA_BASE_URL: ${OOH_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OOH_TEST_GENERATOR_MODEL: ${OOH_TEST_GENERATOR_MODEL:-qwen3-coder:8b}
+      OOH_ANSWER_JUDGE_MODEL: ${OOH_ANSWER_JUDGE_MODEL:-deepseek-r1:8b}
+    volumes:
+      - ./.ooh_cache:/ooh_cache
+      - ${OOH_REPOSITORY_MOUNT:-.:/workspace:ro}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "ooh.worker.healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+volumes:
+  postgres_data:

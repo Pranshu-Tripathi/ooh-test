@@ -1,2 +1,10 @@
 .brains
 .design
+.env
+.ooh_cache/
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.pyc
+*.egg-info/
