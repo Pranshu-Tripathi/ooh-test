@@ -39,8 +39,14 @@ start_forward() {
     kubectl_path=$(command -v kubectl)
 
     if pid=$(managed_pid); then
-        echo "API port-forward already running with PID $pid"
-        return 0
+        if curl --fail --silent --show-error \
+            http://127.0.0.1:8500/healthz >/dev/null 2>&1
+        then
+            echo "API port-forward already running with PID $pid"
+            return 0
+        fi
+        echo "replacing stale API port-forward PID $pid"
+        stop_forward
     fi
 
     mkdir -p "$runtime_dir"

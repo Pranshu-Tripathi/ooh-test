@@ -79,8 +79,8 @@ existing Compose defaults. Never add GitHub tokens, personal access tokens, encr
 non-local database credentials to this manifest.
 
 Compose-only host-port settings are omitted because Kubernetes access uses `kubectl port-forward`.
-`OOH_WORKER_JOB_TYPES` will be set per role-specific Deployment, and `OOH_REPOSITORY_MOUNT` remains
-deferred until the Docker Desktop read-only local-repository mount checkpoint.
+`OOH_WORKER_JOB_TYPES` is set per role-specific Deployment. Local repository access is deliberately
+absent from the base and is added only by the checkpoint 9 Docker Desktop overlay.
 
 Both PVCs use Docker Desktop's `standard` local-path StorageClass and `ReadWriteOnce`. Docker
 Desktop is a single-node cluster, so the cache may be mounted by multiple project pods scheduled on
@@ -291,6 +291,54 @@ heartbeat through INFO logs:
 The scheduler is a Kubernetes Deployment, not a Kubernetes Service: it consumes database state and
 accepts no inbound network traffic. A CronJob must not run beside it.
 
+## Checkpoint 9: read-only local repositories
+
+Docker Desktop does not expose an arbitrary macOS directory directly inside its kind node. The
+project therefore establishes an ephemeral, project-scoped bridge at
+`/var/lib/ooh-test/host-repositories` in that node and applies
+`k8s/overlays/docker-desktop-local-repositories`. The overlay maps one user-approved host root back
+to the same absolute path in exactly two pods:
+
+- `scheduler`, which reads the registered repository's commit SHA;
+- `worker-ingestion`, which copies the committed tree into the writable `ooh-cache` PVC.
+
+The API, generation worker, and judging worker do not receive the host mount. Both exposed mounts
+are read-only, and the configured repository `source_uri` must be below the approved root.
+
+Choose the narrowest directory that contains the repositories you intend to register, then start
+the runtime:
+
+```bash
+OOH_K8S_REPOSITORY_HOST_ROOT=/Users/you/code ./scripts/k8s/client/up
+```
+
+The approved path is canonicalized and saved in the ignored local file
+`k8s/overlays/docker-desktop-local-repositories/repository-mount.env`; later `up` calls reuse it.
+The helper rejects relative paths and broad `/`, `/Users`, and current-user home roots. Run
+`./scripts/k8s/client/down` before changing the approved root, then pass the new value on the next
+`up`.
+
+The bridge is implemented by a temporary privileged Docker helper because the Docker Desktop kind
+node does not inherit ordinary macOS file-sharing mounts. It joins only the Docker Desktop
+kubelet's namespaces, attaches the approved source read-only at the fixed project node path, and
+then exits. It does not change Docker Desktop settings, the global kubectl context, or another
+namespace. `down` waits for the affected pods to stop before removing the bridge. A subsequent
+`up` restores it after `down`, a Docker Desktop restart, or node recreation.
+
+Check the configured bridge and pod visibility with:
+
+```bash
+./scripts/k8s/client/status
+./scripts/k8s/internals/local-repository-mount status
+./scripts/k8s/internals/kubectl-ooh-test exec deployment/scheduler -- \
+  git -C /Users/you/code/example rev-parse HEAD
+./scripts/k8s/internals/kubectl-ooh-test exec deployment/worker-ingestion -- \
+  git -C /Users/you/code/example rev-parse HEAD
+```
+
+Public GitHub repositories continue to clone into `ooh-cache` and do not require this host bridge.
+This checkpoint creates no Service, Ingress, NodePort, LoadBalancer, or additional host port.
+
 ## Network and port contract
 
 Phase 3 starts with port-forwarding. It does not create an Ingress, NodePort, or LoadBalancer
@@ -317,11 +365,10 @@ If direct database access is temporarily needed:
 No Kubernetes workflow in this repository may bind a host port outside `8500`–`8510`. Service
 ports inside the cluster are not host-facing and keep their native values.
 
-## Provider assumptions to validate in later checkpoints
+## Provider assumptions and remaining validations
 
 - Docker Desktop provides the default `standard` local-path StorageClass.
-- Public GitHub repositories are cloned into a shared cache volume before host repository mounts
-  are introduced.
+- Public GitHub repositories clone into the shared cache volume without a host repository mount.
 - Native Ollama remains on macOS. Workers will receive a configurable
   `OOH_OLLAMA_BASE_URL`; Docker Desktop connectivity through `host.docker.internal` must be proven
   with a running workload.

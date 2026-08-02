@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scheduler
+  namespace: ooh-test
+spec:
+  template:
+    spec:
+      containers:
+        - name: scheduler
+          volumeMounts:
+            - name: host-repositories
+              mountPath: /replace-with-approved-host-root
+              readOnly: true
+      volumes:
+        - name: host-repositories
+          hostPath:
+            path: /var/lib/ooh-test/host-repositories
+            type: Directory

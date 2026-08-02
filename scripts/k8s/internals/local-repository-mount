@@ -1,0 +1,72 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+helper_script="$script_dir/node-host-mount.py"
+image_name="ooh-test:local"
+
+run_helper() {
+    docker --context desktop-linux run \
+        --rm \
+        --privileged \
+        --pid=host \
+        --volume "$helper_script:/node-host-mount.py:ro" \
+        --entrypoint python \
+        "$@"
+}
+
+case "${1:-}" in
+    mount)
+        if [ "$#" -ne 2 ]; then
+            echo "usage: $0 mount <approved-host-root>" >&2
+            exit 64
+        fi
+        requested_root=$2
+        case "$requested_root" in
+            /*) ;;
+            *)
+                echo "approved host repository root must be an absolute path" >&2
+                exit 64
+                ;;
+        esac
+        case "$requested_root" in
+            *:*)
+                echo "approved host repository root cannot contain ':'" >&2
+                exit 64
+                ;;
+        esac
+        if [ ! -d "$requested_root" ]; then
+            echo "approved host repository root is not a directory: $requested_root" >&2
+            exit 1
+        fi
+        approved_root=$(CDPATH= cd -- "$requested_root" && pwd -P)
+        current_user=$(id -un)
+        case "$approved_root" in
+            /|/Users|"/Users/$current_user")
+                echo "refusing an overly broad host repository root: $approved_root" >&2
+                exit 64
+                ;;
+        esac
+        run_helper \
+            --volume "$approved_root:/source:ro" \
+            "$image_name" \
+            /node-host-mount.py \
+            mount \
+            --source-root "$approved_root"
+        ;;
+    unmount|status)
+        if [ "$#" -ne 1 ]; then
+            echo "usage: $0 ${1:-unmount}" >&2
+            exit 64
+        fi
+        run_helper \
+            "$image_name" \
+            /node-host-mount.py \
+            "$1"
+        ;;
+    *)
+        echo "usage: $0 <mount approved-host-root|unmount|status>" >&2
+        exit 64
+        ;;
+esac
