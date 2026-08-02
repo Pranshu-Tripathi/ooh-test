@@ -11,3 +11,4 @@ __pycache__/
 frontend/dist/
 frontend/node_modules/
 frontend/*.tsbuildinfo
+k8s/overlays/docker-desktop-local-repositories/repository-mount.env

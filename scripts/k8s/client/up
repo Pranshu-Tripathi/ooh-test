@@ -1,0 +1,57 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+internal_dir=$(CDPATH= cd -- "$script_dir/../internals" && pwd)
+repository_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
+kubectl_ooh="$internal_dir/kubectl-ooh-test"
+startup_timeout="${OOH_K8S_STARTUP_TIMEOUT:-300s}"
+local_repository_overlay="$repository_root/k8s/overlays/docker-desktop-local-repositories"
+local_repository_configuration="$local_repository_overlay/repository-mount.env"
+local_repositories_enabled=false
+
+if [ "${OOH_K8S_SKIP_BUILD:-0}" != "1" ]; then
+    "$internal_dir/build-image"
+fi
+
+if [ -n "${OOH_K8S_REPOSITORY_HOST_ROOT:-}" ]; then
+    requested_root=$OOH_K8S_REPOSITORY_HOST_ROOT
+    "$internal_dir/local-repository-mount" mount "$requested_root"
+    approved_root=$(CDPATH= cd -- "$requested_root" && pwd -P)
+    umask 077
+    configuration_temp="$local_repository_configuration.tmp.$$"
+    printf 'OOH_K8S_REPOSITORY_HOST_ROOT=%s\n' "$approved_root" >"$configuration_temp"
+    mv "$configuration_temp" "$local_repository_configuration"
+    local_repositories_enabled=true
+elif [ -f "$local_repository_configuration" ]; then
+    approved_root=$(
+        sed -n \
+            's/^OOH_K8S_REPOSITORY_HOST_ROOT=//p' \
+            "$local_repository_configuration"
+    )
+    if [ -z "$approved_root" ]; then
+        echo "invalid local repository configuration: $local_repository_configuration" >&2
+        exit 1
+    fi
+    "$internal_dir/local-repository-mount" mount "$approved_root"
+    local_repositories_enabled=true
+fi
+
+"$kubectl_ooh" apply -k "$repository_root/k8s/base"
+"$kubectl_ooh" rollout status statefulset/postgres --timeout="$startup_timeout"
+
+"$internal_dir/run-migrations"
+"$internal_dir/deploy-api" --migrations-complete
+if [ "$local_repositories_enabled" = true ]; then
+    "$internal_dir/deploy-local-repositories" --migrations-complete
+else
+    "$internal_dir/deploy-workers" --migrations-complete
+    "$internal_dir/deploy-scheduler" --migrations-complete
+fi
+"$internal_dir/port-forward-api" start
+
+if [ "$local_repositories_enabled" = true ]; then
+    echo "local repositories mounted read-only from $approved_root"
+fi
+echo "ooh-test is up at http://127.0.0.1:8500"

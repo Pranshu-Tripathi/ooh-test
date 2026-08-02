@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: ooh-test
+
+resources:
+  - ../../scheduler
+  - ../../workers
+
+configMapGenerator:
+  - name: ooh-local-repository-mount
+    envs:
+      - repository-mount.env
+
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/part-of: ooh-test
+    app.kubernetes.io/component: local-repository-configuration
+
+patches:
+  - path: scheduler-mount.yaml
+  - path: worker-ingestion-mount.yaml
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: ooh-local-repository-mount
+      fieldPath: data.OOH_K8S_REPOSITORY_HOST_ROOT
+    targets:
+      - select:
+          kind: Deployment
+          name: scheduler
+        fieldPaths:
+          - spec.template.spec.containers.[name=scheduler].volumeMounts.[name=host-repositories].mountPath
+      - select:
+          kind: Deployment
+          name: worker-ingestion
+        fieldPaths:
+          - spec.template.spec.containers.[name=worker].volumeMounts.[name=host-repositories].mountPath

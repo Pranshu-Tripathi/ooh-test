@@ -1,0 +1,63 @@
+#!/bin/sh
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repository_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
+kubectl_ooh="$script_dir/kubectl-ooh-test"
+rollout_timeout="${OOH_K8S_ROLLOUT_TIMEOUT:-300s}"
+deployments="worker-ingestion worker-generation worker-judging"
+existing_deployments=""
+migrations_complete=false
+
+case "${1:-}" in
+    "")
+        ;;
+    --migrations-complete)
+        migrations_complete=true
+        ;;
+    *)
+        echo "usage: $0 [--migrations-complete]" >&2
+        exit 64
+        ;;
+esac
+
+if [ "$migrations_complete" = false ]; then
+    "$script_dir/run-migrations"
+fi
+
+for deployment in $deployments
+do
+    current_replicas=$(
+        "$kubectl_ooh" get "deployment/$deployment" \
+            -o jsonpath='{.spec.replicas}' 2>/dev/null || true
+    )
+    if [ "${current_replicas:-0}" -gt 0 ]
+    then
+        existing_deployments="$existing_deployments $deployment"
+    fi
+done
+
+"$kubectl_ooh" apply -k "$repository_root/k8s/workers"
+
+for deployment in $existing_deployments
+do
+    "$kubectl_ooh" rollout restart "deployment/$deployment"
+done
+
+for deployment in $deployments
+do
+    if ! "$kubectl_ooh" rollout status \
+        "deployment/$deployment" \
+        --timeout="$rollout_timeout"
+    then
+        "$kubectl_ooh" describe "deployment/$deployment" >&2 || true
+        "$kubectl_ooh" get pods \
+            -l "app.kubernetes.io/component=$deployment" \
+            -o wide >&2 || true
+        "$kubectl_ooh" logs "deployment/$deployment" \
+            --all-pods=true \
+            --tail=100 >&2 || true
+        exit 1
+    fi
+done

@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -eu
+
+# These are per-command flags; this wrapper never changes the global kubectl context.
+context="docker-desktop"
+namespace="ooh-test"
+
+if ! command -v kubectl >/dev/null 2>&1; then
+    echo "kubectl is required" >&2
+    exit 127
+fi
+
+if ! kubectl config get-contexts "$context" --no-headers >/dev/null 2>&1; then
+    echo "kubectl context '$context' is not configured" >&2
+    exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+    echo "usage: $0 <kubectl arguments>" >&2
+    exit 64
+fi
+
+if [ "$1" = "config" ]; then
+    echo "kubectl config commands are refused; this wrapper never changes global context" >&2
+    exit 64
+fi
+
+exec kubectl --context "$context" --namespace "$namespace" "$@"

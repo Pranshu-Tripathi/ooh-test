@@ -12,6 +12,12 @@ The Phase 2 development runtime uses Docker Compose with:
 - durable repo-local cache directory
 - native host Ollama access through `host.docker.internal`
 
+Phase 3 is adding Docker Desktop Kubernetes as an optional advanced runtime. Its resources are
+restricted to the `docker-desktop` context and `ooh-test` namespace, and local access uses
+port-forwarding on host ports `8500`–`8510`. See [k8s/README.md](k8s/README.md) for the current
+checkpoint and guarded command workflow. Compose remains the working fallback while the
+Kubernetes rollout proceeds.
+
 ## Local Runtime
 
 Start Compose with the built-in local defaults:

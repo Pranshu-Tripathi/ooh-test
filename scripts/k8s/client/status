@@ -1,0 +1,106 @@
+#!/bin/sh
+
+set -u
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+internal_dir=$(CDPATH= cd -- "$script_dir/../internals" && pwd)
+repository_root=$(CDPATH= cd -- "$script_dir/../../.." && pwd)
+kubectl_ooh="$internal_dir/kubectl-ooh-test"
+local_repository_configuration="$repository_root/k8s/overlays/docker-desktop-local-repositories/repository-mount.env"
+system_ready=true
+
+"$kubectl_ooh" get \
+    deployments,statefulsets,pods,services,persistentvolumeclaims,jobs \
+    -o wide
+
+for deployment in api worker-ingestion worker-generation worker-judging scheduler
+do
+    ready_replicas=$(
+        "$kubectl_ooh" get "deployment/$deployment" \
+            -o jsonpath='{.status.readyReplicas}' 2>/dev/null
+    )
+    if [ "${ready_replicas:-0}" != "1" ]; then
+        system_ready=false
+    fi
+done
+
+postgres_ready=$(
+    "$kubectl_ooh" get statefulset/postgres \
+        -o jsonpath='{.status.readyReplicas}' 2>/dev/null
+)
+if [ "${postgres_ready:-0}" != "1" ]; then
+    system_ready=false
+fi
+
+if [ -f "$local_repository_configuration" ]; then
+    approved_root=$(
+        sed -n \
+            's/^OOH_K8S_REPOSITORY_HOST_ROOT=//p' \
+            "$local_repository_configuration"
+    )
+    cluster_root=$(
+        "$kubectl_ooh" get configmap/ooh-local-repository-mount \
+            -o jsonpath='{.data.OOH_K8S_REPOSITORY_HOST_ROOT}' 2>/dev/null
+    )
+    scheduler_mount=$(
+        "$kubectl_ooh" get deployment/scheduler \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="scheduler")].volumeMounts[?(@.name=="host-repositories")].mountPath}' \
+            2>/dev/null
+    )
+    ingestion_mount=$(
+        "$kubectl_ooh" get deployment/worker-ingestion \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="worker")].volumeMounts[?(@.name=="host-repositories")].mountPath}' \
+            2>/dev/null
+    )
+    scheduler_read_only=$(
+        "$kubectl_ooh" get deployment/scheduler \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="scheduler")].volumeMounts[?(@.name=="host-repositories")].readOnly}' \
+            2>/dev/null
+    )
+    ingestion_read_only=$(
+        "$kubectl_ooh" get deployment/worker-ingestion \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="worker")].volumeMounts[?(@.name=="host-repositories")].readOnly}' \
+            2>/dev/null
+    )
+    if ! "$internal_dir/local-repository-mount" status; then
+        echo "Local repository mount: node bridge unavailable"
+        system_ready=false
+    elif [ -z "$approved_root" ] ||
+        [ "$cluster_root" != "$approved_root" ] ||
+        [ "$scheduler_mount" != "$approved_root" ] ||
+        [ "$ingestion_mount" != "$approved_root" ] ||
+        [ "$scheduler_read_only" != "true" ] ||
+        [ "$ingestion_read_only" != "true" ]
+    then
+        echo "Local repository mount: configuration mismatch"
+        system_ready=false
+    elif "$kubectl_ooh" exec deployment/scheduler -- test -d "$approved_root" &&
+        "$kubectl_ooh" exec deployment/worker-ingestion -- test -d "$approved_root"
+    then
+        echo "Local repository mount: read-only root visible at $approved_root"
+    else
+        echo "Local repository mount: configured but unavailable"
+        system_ready=false
+    fi
+fi
+
+if "$internal_dir/port-forward-api" status; then
+    if curl --fail --silent --show-error \
+        http://127.0.0.1:8500/readyz >/dev/null 2>&1
+    then
+        echo "API readiness through port-forward: ready"
+    else
+        echo "API readiness through port-forward: failed"
+        system_ready=false
+    fi
+else
+    system_ready=false
+fi
+
+if [ "$system_ready" = true ]; then
+    echo "ooh-test status: up"
+    exit 0
+fi
+
+echo "ooh-test status: down or degraded"
+exit 1

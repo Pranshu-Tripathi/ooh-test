@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ooh-runtime
+  namespace: ooh-test
+  labels:
+    app.kubernetes.io/name: ooh-test
+    app.kubernetes.io/part-of: ooh-test
+    app.kubernetes.io/component: configuration
+data:
+  OOH_ENV: development
+  OOH_LOG_LEVEL: INFO
+  OOH_LOG_FORMAT: json
+  OOH_API_HOST: 0.0.0.0
+  OOH_API_PORT: "8500"
+  OOH_WORKER_POLL_INTERVAL_SECONDS: "5"
+  OOH_WORKER_LEASE_SECONDS: "3600"
+  OOH_SCHEDULER_POLL_INTERVAL_SECONDS: "5"
+  OOH_REPOSITORY_POLL_INTERVAL_SECONDS: "30"
+  OOH_REPOSITORY_POLL_TIMEOUT_SECONDS: "30"
+  OOH_SCHEDULER_BATCH_SIZE: "100"
+  OOH_CACHE_ROOT: /ooh_cache
+  OOH_MODEL_PROVIDER: ollama
+  OOH_OLLAMA_BASE_URL: http://host.docker.internal:11434
+  OOH_MODEL_TIMEOUT_SECONDS: "300"
+  OOH_TEST_GENERATOR_MODEL: qwen3:8b
+  OOH_ANSWER_JUDGE_MODEL: deepseek-r1:8b
+  OOH_GENERATION_QUESTIONS_PER_CATEGORY: "3"
+  OOH_GENERATION_PROMPT_MAX_BYTES: "8000"
+  OOH_TOOL_OBSERVATION_MAX_BYTES: "2500"
+  OOH_AGENT_LOOP_TIMEOUT_SECONDS: "600"
